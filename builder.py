@@ -1,3 +1,30 @@
+#!/usr/bin/env python3
+"""bridge-builder: generate Aidoku .aix bridges (1 per Suwayomi source) + repo index.
+
+Reads installed extensions from Suwayomi via GraphQL, auto-installs the ones
+matching LANGUAGES, applies pending updates, and per source generates:
+  repo/<bridge>.aix  (= identical bridge.wasm + generated res/ + opaque 128 icon)
+  repo/index.min.json (Aidoku-style source list) + icons/
+
+Env:
+  SUWAYOMI_URL      internal URL, e.g. http://suwayomi:4567
+                    (Suwayomi itself needs no auth if it listens on NONEatience internally;
+                    edge auth belongs on your reverse proxy)
+  PUBLIC_SUWAYOMI_URL
+                    public URL baked into settings, e.g. https://suwayomi.example.com (required)
+  PUBLIC_REPO_BASE  e.g. https://aidoku.example.com for iconURL/downloadURL (required)
+  CADDY_USER        reverse-proxy basic-auth username, baked (required)
+  BAKE_CREDENTIALS  "true" to also bake the password (CADDY_PASS). Default false.
+                    Only enable this if you understand that anyone holding the
+                    .aix then holds your server credentials.
+  CADDY_PASS        only used when BAKE_CREDENTIALS=true
+  LANGUAGES         "all" (default) | "es" | "es,en" ... Only matching sources get bridges.
+                    Extensions for other languages are left untouched on the server.
+  BRIDGE_WASM       path to the prebuilt generic bridge.wasm template. Default /wasm/bridge.wasm
+  REPO_DIR          output dir. Default /repo
+  POLL_SECONDS      Default 3600.
+"""
+
 import io
 import json
 import os
@@ -20,7 +47,10 @@ BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/wasm/bridge.wasm"))
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 1
+# Bump when the bridge template/res layout changes so Aidoku sees updates
+# even if the extension versionCode didn't move. Final .aix version =
+# versionCode * 10 + TEMPLATE_VERSION.
+TEMPLATE_VERSION = 3
 
 
 def gql(query: str, variables: dict | None = None) -> dict:
@@ -93,15 +123,16 @@ def settings_json(source_id: str) -> str:
         if not BAKE_CREDENTIALS
         else f'\n      {{ "type": "text", "key": "password", "title": "Password", "default": "{CADDY_PASS}", "secure": true }},'
     )
+    # NOTE: Aidoku settings items support "default"; server/user/sourceId baked, password only if flagged.
     return (
-        '[\n  { "type": "group", "title": "Server", "footer": "Suwayomi Server URL", "items": [\n'
+        '[\n  { "type": "group", "title": "Server", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
         f'    {{ "type": "text", "key": "serverUrl", "title": "Suwayomi Server URL", "default": "{PUBLIC_SUWAYOMI_URL}" }}\n'
         "  ]},\n"
         '  { "type": "group", "title": "Auth (Caddy Basic)", "items": [\n'
         f'    {{ "type": "text", "key": "username", "title": "Username", "default": "{CADDY_USER}" }},'
         f"{pw_item}\n"
         "  ]},\n"
-        '  { "type": "group", "title": "Source", "footer": "Suwayomi Source ID", "items": [\n'
+        '  { "type": "group", "title": "Source", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
         f'    {{ "type": "text", "key": "sourceId", "title": "Suwayomi Source ID", "default": "{source_id}" }}\n'
         "  ]}\n]"
     )
@@ -139,6 +170,7 @@ def build_aix(
     icon_bytes: bytes,
     wasm_bytes: bytes,
 ) -> tuple[str, str]:
+    """Returns (aix_filename, icon_filename)."""
     work = REPO_DIR / ".work" / bridge_id
     if work.exists():
         for p in sorted(work.rglob("*"), reverse=True):
@@ -180,6 +212,7 @@ def save_state(state: dict) -> None:
 
 
 def site_url_for(source: dict) -> str:
+    # Best effort: repo bridge keeps original site unknown; point at server.
     return PUBLIC_SUWAYOMI_URL
 
 
