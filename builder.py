@@ -14,10 +14,10 @@ Env:
   SUWAYOMI_URL      internal URL, e.g. http://suwayomi:4567
   SUWAYOMI_USER     server username (required). Used to talk to Suwayomi and
                     baked as the runtime username in every bridge.
-  SUWAYOMI_PASS     server password (optional). Sent to Suwayomi when set;
-                    baked into bridges (obfuscated) only when BAKE_CREDENTIALS
-                    is true. Empty = server without auth, or type the password
-                    once per bridge in Aidoku settings.
+  SUWAYOMI_PASS     server password (required). Sent to Suwayomi on every
+                    request; servers without auth simply ignore the header.
+                    Baked into bridges (obfuscated) only when BAKE_CREDENTIALS
+                    is true — otherwise type it once per bridge in Aidoku.
   PUBLIC_SUWAYOMI_URL
                     public URL baked into settings, e.g. https://suwayomi.example.com (required)
   PUBLIC_REPO_BASE  e.g. https://aidoku.example.com for iconURL/downloadURL (required)
@@ -59,7 +59,7 @@ BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/wasm/bridge.wasm"))
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 5
+TEMPLATE_VERSION = 6
 
 OBF_TAG = "obf1:"
 OBF_SALT = "taisendev-obf1"
@@ -384,6 +384,7 @@ if __name__ == "__main__":
         "PUBLIC_SUWAYOMI_URL": PUBLIC_SUWAYOMI_URL,
         "PUBLIC_REPO_BASE": PUBLIC_REPO_BASE,
         "SUWAYOMI_USER": SUWAYOMI_USER,
+        "SUWAYOMI_PASS": SUWAYOMI_PASS,
     }.items() if not v]
     if BAKE_CREDENTIALS and not SUWAYOMI_PASS:
         missing.append("SUWAYOMI_PASS (required when BAKE_CREDENTIALS=true)")

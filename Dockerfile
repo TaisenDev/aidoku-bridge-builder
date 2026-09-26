@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-ARG TEMPLATE_RELEASE=v0.2.0
+ARG TEMPLATE_RELEASE=v0.3.0
 WORKDIR /app
 COPY requirements.txt .
 RUN apt-get update \

@@ -136,7 +136,7 @@ The builder is configured through environment variables:
 | --- | :---: | --- | --- |
 | `SUWAYOMI_URL` | No | `http://suwayomi:4567` | Internal URL used by the builder to reach Suwayomi. |
 | `SUWAYOMI_USER` | **Yes** | — | Server username: used to talk to Suwayomi and baked as the runtime username. |
-| `SUWAYOMI_PASS` | Conditional | — | Server password: sent to Suwayomi when set; baked (obfuscated) only when `BAKE_CREDENTIALS=true`. Empty = no server auth, or type it once per bridge in Aidoku. |
+| `SUWAYOMI_PASS` | **Yes** | — | Server password, sent on every request (servers without auth ignore it). Baked (obfuscated) only when `BAKE_CREDENTIALS=true`. |
 | `PUBLIC_SUWAYOMI_URL` | **Yes** | — | Public URL baked into generated bridge settings. |
 | `PUBLIC_REPO_BASE` | **Yes** | — | Base URL used for package/icon downloads. |
 | `BAKE_CREDENTIALS` | No | `false` | When `true`, also embeds `SUWAYOMI_PASS` in generated packages, obfuscated as `obf1:` (see below). |
@@ -170,7 +170,7 @@ docker compose up -d --build bridge-builder
 ```yaml
 services:
   bridge-builder:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:0.1.3
+    image: ghcr.io/taisendev/aidoku-bridge-builder:0.1.4
     volumes:
       - ./repo:/repo
     environment:
@@ -221,9 +221,7 @@ the password is embedded in every package, obfuscated as `obf1:{nonce}.{b64}`
 > A server/username change in Aidoku settings decodes to garbage and fails
 > closed (retype the password), but a shared credential-bearing package must
 > still be treated as sensitive. The planned gateway (password never baked,
-> bridge talks to a scoped public API) is the real fix — see
-> [`docs/gateway-endpoints.md`](docs/gateway-endpoints.md) for the endpoint
-> inventory it must cover.
+> bridge talks to a scoped public API) is the real fix.
 
 Keep secrets out of:
 
