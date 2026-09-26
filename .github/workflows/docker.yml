@@ -9,7 +9,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/aidoku-bridge-builder
+  IMAGE: ghcr.io/taisendev/aidoku-bridge-builder
 
 jobs:
   docker:
