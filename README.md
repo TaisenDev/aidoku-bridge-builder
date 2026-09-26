@@ -135,12 +135,11 @@ The builder is configured through environment variables:
 | Variable | Required | Default | Description |
 | --- | :---: | --- | --- |
 | `SUWAYOMI_URL` | No | `http://suwayomi:4567` | Internal URL used by the builder to reach Suwayomi. |
-| `SUWAYOMI_USER` / `SUWAYOMI_PASS` | Conditional | — | Basic-auth for `SUWAYOMI_URL`. **Both or neither**; required when the server runs with `AUTH_MODE=BASIC_AUTH`. |
+| `SUWAYOMI_USER` | **Yes** | — | Server username: used to talk to Suwayomi and baked as the runtime username. |
+| `SUWAYOMI_PASS` | Conditional | — | Server password: sent to Suwayomi when set; baked (obfuscated) only when `BAKE_CREDENTIALS=true`. Empty = no server auth, or type it once per bridge in Aidoku. |
 | `PUBLIC_SUWAYOMI_URL` | **Yes** | — | Public URL baked into generated bridge settings. |
 | `PUBLIC_REPO_BASE` | **Yes** | — | Base URL used for package/icon downloads. |
-| `CADDY_USER` | **Yes** | — | Reverse-proxy username included in generated configuration. |
-| `BAKE_CREDENTIALS` | No | `false` | When `true`, also embeds `CADDY_PASS` in generated packages, obfuscated as `obf1:` (see below). |
-| `CADDY_PASS` | Conditional | — | Reverse-proxy password used only when `BAKE_CREDENTIALS=true`. |
+| `BAKE_CREDENTIALS` | No | `false` | When `true`, also embeds `SUWAYOMI_PASS` in generated packages, obfuscated as `obf1:` (see below). |
 | `LANGUAGES` | No | `es` | Restricts automatic installation, e.g. `es` or `es,en` (or `all`). |
 | `BRIDGE_WASM` | No | `/wasm/bridge.wasm` | Optional override path to a user-supplied template binary. The image already bundles a pinned `bridge.wasm`; set this only to use your own file. |
 | `REPO_DIR` | No | `/repo` | Output directory served as the Aidoku source repository. |
@@ -171,16 +170,15 @@ docker compose up -d --build bridge-builder
 ```yaml
 services:
   bridge-builder:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:0.1.2
+    image: ghcr.io/taisendev/aidoku-bridge-builder:0.1.3
     volumes:
       - ./repo:/repo
     environment:
       SUWAYOMI_URL: http://suwayomi:4567
-      SUWAYOMI_USER: suwayomi-user      # when AUTH_MODE=BASIC_AUTH
-      SUWAYOMI_PASS: suwayomi-pass      # when AUTH_MODE=BASIC_AUTH
+      SUWAYOMI_USER: suwayomi-user
+      SUWAYOMI_PASS: suwayomi-pass      # omit when the server has no auth
       PUBLIC_SUWAYOMI_URL: https://suwayomi.example.com
       PUBLIC_REPO_BASE: https://aidoku.example.com
-      CADDY_USER: proxy-user
       LANGUAGES: es
     restart: unless-stopped
 ```

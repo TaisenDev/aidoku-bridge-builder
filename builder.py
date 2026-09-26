@@ -12,19 +12,20 @@ WASM resolution (first hit wins):
 
 Env:
   SUWAYOMI_URL      internal URL, e.g. http://suwayomi:4567
-  SUWAYOMI_USER / SUWAYOMI_PASS
-                    basic-auth credentials for SUWAYOMI_URL. Required when the
-                    server runs with AUTH_MODE=BASIC_AUTH (both or neither).
+  SUWAYOMI_USER     server username (required). Used to talk to Suwayomi and
+                    baked as the runtime username in every bridge.
+  SUWAYOMI_PASS     server password (optional). Sent to Suwayomi when set;
+                    baked into bridges (obfuscated) only when BAKE_CREDENTIALS
+                    is true. Empty = server without auth, or type the password
+                    once per bridge in Aidoku settings.
   PUBLIC_SUWAYOMI_URL
                     public URL baked into settings, e.g. https://suwayomi.example.com (required)
   PUBLIC_REPO_BASE  e.g. https://aidoku.example.com for iconURL/downloadURL (required)
-  CADDY_USER        reverse-proxy basic-auth username, baked (required)
-  BAKE_CREDENTIALS  "true" to also bake the password (CADDY_PASS). Default false.
-                    Baked passwords are OBFUSCATED (obf1:), not encrypted: anyone
-                    holding the .aix plus the public template source can recover
-                    them. Only enable this if you accept that. The gateway
-                    (password never baked) is the real fix.
-  CADDY_PASS        only used when BAKE_CREDENTIALS=true
+  BAKE_CREDENTIALS  "true" to also bake SUWAYOMI_PASS (requires it set).
+                    Default false. Baked passwords are OBFUSCATED (obf1:), not
+                    encrypted: anyone holding the .aix plus the public template
+                    source can recover them. The gateway (password never baked)
+                    is the real fix.
   LANGUAGES         "es" (default) | "es,en" | "all" ... Only matching sources
                     get bridges. Extensions for other languages are left
                     untouched on the server.
@@ -52,28 +53,26 @@ SUWAYOMI_USER = os.environ.get("SUWAYOMI_USER", "")
 SUWAYOMI_PASS = os.environ.get("SUWAYOMI_PASS", "")
 PUBLIC_SUWAYOMI_URL = os.environ.get("PUBLIC_SUWAYOMI_URL", "").rstrip("/")
 PUBLIC_REPO_BASE = os.environ.get("PUBLIC_REPO_BASE", "").rstrip("/")
-CADDY_USER = os.environ.get("CADDY_USER", "")
 BAKE_CREDENTIALS = os.environ.get("BAKE_CREDENTIALS", "false").lower() in ("1", "true", "yes")
-CADDY_PASS = os.environ.get("CADDY_PASS", "")
 LANGUAGES = [l.strip().lower() for l in os.environ.get("LANGUAGES", "es").split(",") if l.strip()]
 BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/wasm/bridge.wasm"))
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 4
+TEMPLATE_VERSION = 5
 
 OBF_TAG = "obf1:"
 OBF_SALT = "taisendev-obf1"
 
 
 def obf_nonce() -> str:
-    seed = f"{PUBLIC_SUWAYOMI_URL}:{CADDY_USER}:{OBF_SALT}".encode()
+    seed = f"{PUBLIC_SUWAYOMI_URL}:{SUWAYOMI_USER}:{OBF_SALT}".encode()
     return hashlib.sha256(seed).hexdigest()[:16]
 
 
 def obf_encode(secret: str) -> str:
     nonce = obf_nonce()
-    key = hashlib.sha256(f"{nonce}:{PUBLIC_SUWAYOMI_URL}:{CADDY_USER}:{OBF_SALT}".encode()).digest()
+    key = hashlib.sha256(f"{nonce}:{PUBLIC_SUWAYOMI_URL}:{SUWAYOMI_USER}:{OBF_SALT}".encode()).digest()
     raw = secret.encode()
     x = bytes(b ^ key[i % len(key)] for i, b in enumerate(raw))
     return f"{OBF_TAG}{nonce}.{base64.b64encode(x).decode()}"
@@ -155,14 +154,14 @@ def settings_json(source_id: str) -> str:
     pw_item = (
         '\n      { "type": "text", "key": "password", "title": "Password", "placeholder": "pass", "secure": true },'
         if not BAKE_CREDENTIALS
-        else f'\n      {{ "type": "text", "key": "password", "title": "Password", "default": "{obf_encode(CADDY_PASS)}", "secure": true }},'
+        else f'\n      {{ "type": "text", "key": "password", "title": "Password", "default": "{obf_encode(SUWAYOMI_PASS)}", "secure": true }},'
     )
     return (
         '[\n  { "type": "group", "title": "Server", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
         f'    {{ "type": "text", "key": "serverUrl", "title": "Suwayomi Server URL", "default": "{PUBLIC_SUWAYOMI_URL}" }}\n'
         "  ]},\n"
-        '  { "type": "group", "title": "Auth (Caddy Basic)", "footer": "Si cambias servidor o usuario, reescribe la contraseña.", "items": [\n'
-        f'    {{ "type": "text", "key": "username", "title": "Username", "default": "{CADDY_USER}" }},'
+        '  { "type": "group", "title": "Auth (Basic)", "footer": "Si cambias servidor o usuario, reescribe la contraseña.", "items": [\n'
+        f'    {{ "type": "text", "key": "username", "title": "Username", "default": "{SUWAYOMI_USER}" }},'
         f"{pw_item}\n"
         "  ]},\n"
         '  { "type": "group", "title": "Source", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
@@ -384,12 +383,10 @@ if __name__ == "__main__":
     missing = [k for k, v in {
         "PUBLIC_SUWAYOMI_URL": PUBLIC_SUWAYOMI_URL,
         "PUBLIC_REPO_BASE": PUBLIC_REPO_BASE,
-        "CADDY_USER": CADDY_USER,
+        "SUWAYOMI_USER": SUWAYOMI_USER,
     }.items() if not v]
-    if BAKE_CREDENTIALS and not CADDY_PASS:
-        missing.append("CADDY_PASS (required when BAKE_CREDENTIALS=true)")
-    if bool(SUWAYOMI_USER) != bool(SUWAYOMI_PASS):
-        missing.append("SUWAYOMI_USER + SUWAYOMI_PASS (both or neither)")
+    if BAKE_CREDENTIALS and not SUWAYOMI_PASS:
+        missing.append("SUWAYOMI_PASS (required when BAKE_CREDENTIALS=true)")
     if missing:
         print(f"FATAL: missing required env: {', '.join(missing)}", flush=True)
         sys.exit(1)
