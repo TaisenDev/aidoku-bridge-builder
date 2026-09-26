@@ -152,10 +152,12 @@ Missing required variables fail fast with an explicit configuration error.
 ### Pull the image
 
 ```bash
-docker pull ghcr.io/<OWNER>/aidoku-bridge-builder:latest
+docker pull ghcr.io/taisendev/aidoku-bridge-builder:latest
 ```
 
-Replace `<OWNER>` with the GitHub/registry owner used for your published image.
+The image path always mirrors the lowercase GitHub owner
+(`ghcr.io/<owner>/<image>`), so it stays correct across renames and forks —
+no placeholder needed.
 
 ### Build locally
 
@@ -168,7 +170,7 @@ docker compose up -d --build bridge-builder
 ```yaml
 services:
   bridge-builder:
-    image: ghcr.io/<OWNER>/aidoku-bridge-builder:latest
+    image: ghcr.io/taisendev/aidoku-bridge-builder:latest
     volumes:
       - ./repo:/repo
       - ./bridge.wasm:/wasm/bridge.wasm:ro
