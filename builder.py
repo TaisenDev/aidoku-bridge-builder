@@ -3,28 +3,39 @@
 
 Reads installed extensions from Suwayomi via GraphQL, auto-installs the ones
 matching LANGUAGES, applies pending updates, and per source generates:
-  repo/<bridge>.aix  (= identical bridge.wasm + generated res/ + opaque 128 icon)
+  repo/<bridge>.aix  (= shared bridge.wasm + generated res/ + opaque 128 icon)
   repo/index.min.json (Aidoku-style source list) + icons/
+
+WASM resolution (first hit wins):
+  1. $BRIDGE_WASM when it points to an existing non-empty file (user override)
+  2. /wasm/bridge.wasm baked into the image from a pinned template release
 
 Env:
   SUWAYOMI_URL      internal URL, e.g. http://suwayomi:4567
-                    (Suwayomi itself needs no auth if it listens on NONEatience internally;
-                    edge auth belongs on your reverse proxy)
+  SUWAYOMI_USER / SUWAYOMI_PASS
+                    basic-auth credentials for SUWAYOMI_URL. Required when the
+                    server runs with AUTH_MODE=BASIC_AUTH (both or neither).
   PUBLIC_SUWAYOMI_URL
                     public URL baked into settings, e.g. https://suwayomi.example.com (required)
   PUBLIC_REPO_BASE  e.g. https://aidoku.example.com for iconURL/downloadURL (required)
   CADDY_USER        reverse-proxy basic-auth username, baked (required)
   BAKE_CREDENTIALS  "true" to also bake the password (CADDY_PASS). Default false.
-                    Only enable this if you understand that anyone holding the
-                    .aix then holds your server credentials.
+                    Baked passwords are OBFUSCATED (obf1:), not encrypted: anyone
+                    holding the .aix plus the public template source can recover
+                    them. Only enable this if you accept that. The gateway
+                    (password never baked) is the real fix.
   CADDY_PASS        only used when BAKE_CREDENTIALS=true
-  LANGUAGES         "all" (default) | "es" | "es,en" ... Only matching sources get bridges.
-                    Extensions for other languages are left untouched on the server.
-  BRIDGE_WASM       path to the prebuilt generic bridge.wasm template. Default /wasm/bridge.wasm
+  LANGUAGES         "es" (default) | "es,en" | "all" ... Only matching sources
+                    get bridges. Extensions for other languages are left
+                    untouched on the server.
+  BRIDGE_WASM       override path to a user-supplied bridge.wasm template.
+                    Default /wasm/bridge.wasm (image-bundled, pinned release).
   REPO_DIR          output dir. Default /repo
   POLL_SECONDS      Default 3600.
 """
 
+import base64
+import hashlib
 import io
 import json
 import os
@@ -37,26 +48,49 @@ import requests
 from PIL import Image
 
 SUWAYOMI_URL = os.environ.get("SUWAYOMI_URL", "http://suwayomi:4567")
+SUWAYOMI_USER = os.environ.get("SUWAYOMI_USER", "")
+SUWAYOMI_PASS = os.environ.get("SUWAYOMI_PASS", "")
 PUBLIC_SUWAYOMI_URL = os.environ.get("PUBLIC_SUWAYOMI_URL", "").rstrip("/")
 PUBLIC_REPO_BASE = os.environ.get("PUBLIC_REPO_BASE", "").rstrip("/")
 CADDY_USER = os.environ.get("CADDY_USER", "")
 BAKE_CREDENTIALS = os.environ.get("BAKE_CREDENTIALS", "false").lower() in ("1", "true", "yes")
 CADDY_PASS = os.environ.get("CADDY_PASS", "")
-LANGUAGES = [l.strip().lower() for l in os.environ.get("LANGUAGES", "all").split(",") if l.strip()]
+LANGUAGES = [l.strip().lower() for l in os.environ.get("LANGUAGES", "es").split(",") if l.strip()]
 BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/wasm/bridge.wasm"))
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-# Bump when the bridge template/res layout changes so Aidoku sees updates
-# even if the extension versionCode didn't move. Final .aix version =
-# versionCode * 10 + TEMPLATE_VERSION.
-TEMPLATE_VERSION = 3
+TEMPLATE_VERSION = 4
+
+OBF_TAG = "obf1:"
+OBF_SALT = "taisendev-obf1"
+
+
+def obf_nonce() -> str:
+    seed = f"{PUBLIC_SUWAYOMI_URL}:{CADDY_USER}:{OBF_SALT}".encode()
+    return hashlib.sha256(seed).hexdigest()[:16]
+
+
+def obf_encode(secret: str) -> str:
+    nonce = obf_nonce()
+    key = hashlib.sha256(f"{nonce}:{PUBLIC_SUWAYOMI_URL}:{CADDY_USER}:{OBF_SALT}".encode()).digest()
+    raw = secret.encode()
+    x = bytes(b ^ key[i % len(key)] for i, b in enumerate(raw))
+    return f"{OBF_TAG}{nonce}.{base64.b64encode(x).decode()}"
+
+
+def suwayomi_auth() -> dict:
+    if SUWAYOMI_USER:
+        token = base64.b64encode(f"{SUWAYOMI_USER}:{SUWAYOMI_PASS}".encode()).decode()
+        return {"Authorization": f"Basic {token}"}
+    return {}
 
 
 def gql(query: str, variables: dict | None = None) -> dict:
     r = requests.post(
         f"{SUWAYOMI_URL}/api/graphql",
         json={"query": query, "variables": variables or {}},
+        headers=suwayomi_auth(),
         timeout=120,
     )
     r.raise_for_status()
@@ -109,7 +143,7 @@ def want_lang(lang: str) -> bool:
 def make_icon(src_url: str) -> bytes:
     if src_url.startswith("/"):
         src_url = SUWAYOMI_URL + src_url
-    r = requests.get(src_url, timeout=60)
+    r = requests.get(src_url, headers=suwayomi_auth(), timeout=60)
     r.raise_for_status()
     img = Image.open(io.BytesIO(r.content)).convert("RGB").resize((128, 128), Image.LANCZOS)
     buf = io.BytesIO()
@@ -121,14 +155,13 @@ def settings_json(source_id: str) -> str:
     pw_item = (
         '\n      { "type": "text", "key": "password", "title": "Password", "placeholder": "pass", "secure": true },'
         if not BAKE_CREDENTIALS
-        else f'\n      {{ "type": "text", "key": "password", "title": "Password", "default": "{CADDY_PASS}", "secure": true }},'
+        else f'\n      {{ "type": "text", "key": "password", "title": "Password", "default": "{obf_encode(CADDY_PASS)}", "secure": true }},'
     )
-    # NOTE: Aidoku settings items support "default"; server/user/sourceId baked, password only if flagged.
     return (
         '[\n  { "type": "group", "title": "Server", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
         f'    {{ "type": "text", "key": "serverUrl", "title": "Suwayomi Server URL", "default": "{PUBLIC_SUWAYOMI_URL}" }}\n'
         "  ]},\n"
-        '  { "type": "group", "title": "Auth (Caddy Basic)", "items": [\n'
+        '  { "type": "group", "title": "Auth (Caddy Basic)", "footer": "Si cambias servidor o usuario, reescribe la contraseña.", "items": [\n'
         f'    {{ "type": "text", "key": "username", "title": "Username", "default": "{CADDY_USER}" }},'
         f"{pw_item}\n"
         "  ]},\n"
@@ -212,7 +245,6 @@ def save_state(state: dict) -> None:
 
 
 def site_url_for(source: dict) -> str:
-    # Best effort: repo bridge keeps original site unknown; point at server.
     return PUBLIC_SUWAYOMI_URL
 
 
@@ -343,8 +375,11 @@ if __name__ == "__main__":
 
     REPO_DIR.mkdir(parents=True, exist_ok=True)
     (REPO_DIR / "icons").mkdir(exist_ok=True)
-    if not BRIDGE_WASM.exists():
+    if not BRIDGE_WASM.exists() or BRIDGE_WASM.stat().st_size == 0:
         print(f"FATAL: missing template wasm at {BRIDGE_WASM}", flush=True)
+        sys.exit(1)
+    if BRIDGE_WASM.read_bytes()[:4] != b"\0asm":
+        print(f"FATAL: {BRIDGE_WASM} is not a wasm binary", flush=True)
         sys.exit(1)
     missing = [k for k, v in {
         "PUBLIC_SUWAYOMI_URL": PUBLIC_SUWAYOMI_URL,
@@ -353,6 +388,8 @@ if __name__ == "__main__":
     }.items() if not v]
     if BAKE_CREDENTIALS and not CADDY_PASS:
         missing.append("CADDY_PASS (required when BAKE_CREDENTIALS=true)")
+    if bool(SUWAYOMI_USER) != bool(SUWAYOMI_PASS):
+        missing.append("SUWAYOMI_USER + SUWAYOMI_PASS (both or neither)")
     if missing:
         print(f"FATAL: missing required env: {', '.join(missing)}", flush=True)
         sys.exit(1)

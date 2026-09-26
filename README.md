@@ -135,13 +135,14 @@ The builder is configured through environment variables:
 | Variable | Required | Default | Description |
 | --- | :---: | --- | --- |
 | `SUWAYOMI_URL` | No | `http://suwayomi:4567` | Internal URL used by the builder to reach Suwayomi. |
+| `SUWAYOMI_USER` / `SUWAYOMI_PASS` | Conditional | — | Basic-auth for `SUWAYOMI_URL`. **Both or neither**; required when the server runs with `AUTH_MODE=BASIC_AUTH`. |
 | `PUBLIC_SUWAYOMI_URL` | **Yes** | — | Public URL baked into generated bridge settings. |
 | `PUBLIC_REPO_BASE` | **Yes** | — | Base URL used for package/icon downloads. |
 | `CADDY_USER` | **Yes** | — | Reverse-proxy username included in generated configuration. |
-| `BAKE_CREDENTIALS` | No | `false` | When `true`, also embeds `CADDY_PASS` in generated packages. |
+| `BAKE_CREDENTIALS` | No | `false` | When `true`, also embeds `CADDY_PASS` in generated packages, obfuscated as `obf1:` (see below). |
 | `CADDY_PASS` | Conditional | — | Reverse-proxy password used only when `BAKE_CREDENTIALS=true`. |
-| `LANGUAGES` | No | `all` | Restricts automatic installation, e.g. `es` or `es,en`. |
-| `BRIDGE_WASM` | No | `/wasm/bridge.wasm` | Path to the shared template binary. |
+| `LANGUAGES` | No | `es` | Restricts automatic installation, e.g. `es` or `es,en` (or `all`). |
+| `BRIDGE_WASM` | No | `/wasm/bridge.wasm` | Optional override path to a user-supplied template binary. The image already bundles a pinned `bridge.wasm`; set this only to use your own file. |
 | `REPO_DIR` | No | `/repo` | Output directory served as the Aidoku source repository. |
 | `POLL_SECONDS` | No | `3600` | Delay between update cycles. |
 
@@ -170,18 +171,23 @@ docker compose up -d --build bridge-builder
 ```yaml
 services:
   bridge-builder:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:latest
+    image: ghcr.io/taisendev/aidoku-bridge-builder:0.1.2
     volumes:
       - ./repo:/repo
-      - ./bridge.wasm:/wasm/bridge.wasm:ro
     environment:
       SUWAYOMI_URL: http://suwayomi:4567
+      SUWAYOMI_USER: suwayomi-user      # when AUTH_MODE=BASIC_AUTH
+      SUWAYOMI_PASS: suwayomi-pass      # when AUTH_MODE=BASIC_AUTH
       PUBLIC_SUWAYOMI_URL: https://suwayomi.example.com
       PUBLIC_REPO_BASE: https://aidoku.example.com
       CADDY_USER: proxy-user
-      LANGUAGES: all
+      LANGUAGES: es
     restart: unless-stopped
 ```
+
+No `bridge.wasm` volume needed: the image bundles the pinned template binary
+(see Release chain). To use your own WASM instead, mount it and set
+`BRIDGE_WASM` to its in-container path.
 
 The output directory (`./repo` in this example) can be served by Caddy, nginx, an object-storage website, or any other static HTTPS server.
 
@@ -205,11 +211,21 @@ That means a template bug fix can propagate through the existing source packages
 Credentials deserve special attention because generated `.aix` packages can be shared independently of the builder.
 
 By default, `BAKE_CREDENTIALS=false`, which avoids embedding the proxy password in every package.
+With this setting the password lives only on the user's device (typed once in Aidoku source settings).
 
 Enabling `BAKE_CREDENTIALS=true` intentionally changes that security model:
+the password is embedded in every package, obfuscated as `obf1:{nonce}.{b64}`
+(XOR with a SHA-256 key bound to server URL + username + nonce).
 
 > [!WARNING]
-> Anyone who obtains a generated `.aix` package may be able to recover the baked password. Treat a credential-bearing package as sensitive and do not publish it to an untrusted location.
+> Obfuscation is **not** encryption. Anyone who obtains a generated `.aix`
+> package plus the public template source can recover the baked password.
+> A server/username change in Aidoku settings decodes to garbage and fails
+> closed (retype the password), but a shared credential-bearing package must
+> still be treated as sensitive. The planned gateway (password never baked,
+> bridge talks to a scoped public API) is the real fix — see
+> [`docs/gateway-endpoints.md`](docs/gateway-endpoints.md) for the endpoint
+> inventory it must cover.
 
 Keep secrets out of:
 
@@ -218,6 +234,22 @@ Keep secrets out of:
 - Docker images intended for public distribution
 - build logs
 - public package repositories
+
+## Release chain (template → image → repo)
+
+The image carries a **pinned** template binary (`Dockerfile` `ARG TEMPLATE_RELEASE`),
+never `latest`. Publishing a template change is three ordered steps:
+
+```text
+1. template repo  → tag vX.Y.Z → CI publishes bridge.wasm release asset
+2. builder repo   → bump Dockerfile ARG TEMPLATE_RELEASE=vX.Y.Z (+ TEMPLATE_VERSION
+                   when res/layout changes) → tag vA.B.C → CI pushes image
+3. deployment     → docker compose pull bridge-builder → next cycle rebuilds
+                   every bridge → Aidoku offers updates
+```
+
+`TEMPLATE_VERSION` forces a rebuild of all packages even when no upstream
+extension changed, so template fixes propagate through the existing `.aix` files.
 
 ## Runtime behavior
 
