@@ -59,7 +59,7 @@ BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/wasm/bridge.wasm"))
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 7
+TEMPLATE_VERSION = 8
 
 OBF_TAG = "obf1:"
 OBF_SALT = "taisendev-obf1"
@@ -186,7 +186,7 @@ def source_json(bridge_id: str, name: str, site_url: str, lang: str, version: in
                 {"id": "popular", "name": "Popular", "kind": 0},
                 {"id": "latest", "name": "Latest", "kind": 0},
             ],
-            "config": {"supportsTagSearch": False},
+            "config": {"supportsTagSearch": False, "breakingChangeVersion": version},
         },
         ensure_ascii=False,
     )

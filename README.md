@@ -204,6 +204,11 @@ This makes both sides of the project update-aware:
 
 That means a template bug fix can propagate through the existing source packages without requiring source-specific Rust changes.
 
+Each package also ships `config.breakingChangeVersion` set to its own
+version, so Aidoku runs the bridge's key migration (legacy numeric → stable,
+failures keep the old key) exactly when the package updates. The migration
+handler is idempotent, so repeated runs are safe.
+
 ## Credentials & security
 
 Credentials deserve special attention because generated `.aix` packages can be shared independently of the builder.
