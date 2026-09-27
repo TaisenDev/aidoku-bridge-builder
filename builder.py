@@ -59,7 +59,7 @@ BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/wasm/bridge.wasm"))
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 6
+TEMPLATE_VERSION = 7
 
 OBF_TAG = "obf1:"
 OBF_SALT = "taisendev-obf1"
