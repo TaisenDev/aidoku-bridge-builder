@@ -170,7 +170,7 @@ docker compose up -d --build bridge-builder
 ```yaml
 services:
   bridge-builder:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:0.1.5
+    image: ghcr.io/taisendev/aidoku-bridge-builder:0.1.6
     volumes:
       - ./repo:/repo
     environment:
