@@ -1,9 +1,3 @@
-<p align="center">
-  <a href="https://github.com/TaisenDev">
-    <img src="https://taisen-ar.vercel.app/favicon.svg" alt="TaisenDev" width="140">
-  </a>
-</p>
-
 <h1 align="center">aidoku-bridge-builder</h1>
 
 <p align="center">
@@ -210,24 +204,32 @@ This makes both sides of the project update-aware:
 
 That means a template bug fix can propagate through the existing source packages without requiring source-specific Rust changes.
 
-Each package also ships `config.breakingChangeVersion` set to its own
-version, so Aidoku runs the bridge's legacy manga-key migration when the
-package updates. Stable manga keys include the source ID and manga URL; after
-a Suwayomi database reset, the bridge can re-add a missing manga by its saved
-URL and resolve its new server row ID. The migration handler is idempotent.
-
-Chapter keys are still Suwayomi's numeric chapter IDs. If you replace or reset
-the Suwayomi database, manga identity is recoverable from its URL, but chapter
-IDs can change; back up Aidoku before the first reconnect and check reading
-progress on a small sample before relying on it.
+Each package ships `config.breakingChangeVersion` so Aidoku can run the
+bridge's key migration when a package updates. Manga and chapter identity is
+based on the source ID and canonical source URLs. The bridge fetches manga
+details, chapters, and pages directly through the installed source runtime;
+it does not create or update Suwayomi manga, chapter, page, library, or reading
+progress rows. Reading progress and library membership remain in Aidoku.
 
 ## Credentials & security
 
 Runtime traffic goes phone → gateway → Suwayomi. In the OCI deployment,
 Suwayomi listens only on loopback, the gateway and package-install service
 also bind only to loopback, and Caddy is the only public listener. The gateway
-allows parsed GraphQL documents containing only the bridge's root fields and
-only the manga-thumbnail/chapter-page media paths.
+allows only the bridge operations, a restricted source-filter metadata query,
+and signed media handles. It limits clients to 180 GraphQL and 300 media
+requests per minute, with bursts of 45 and 60; global ceilings are 600
+GraphQL and 1,800 media requests per minute. Images are capped at 16 MiB and
+at most 48 requests run at once.
+The installer allows six package requests per client IP and 30 total per hour,
+builds only one package at a time, and bounds its handler pool to 16 threads.
+
+Source cookies live in process memory for Cloudflare/source compatibility and
+are discarded when Suwayomi restarts; the first startup clears the old
+persistent cookie store and cache directories. The source response cache and
+request-line logging are disabled. Extension APKs, extension/source metadata,
+and normal operational logs still belong to Suwayomi; bridge manga/chapter/page
+results and device library/progress are not stored in its database.
 
 Server URL and bearer token are embedded in the deployment WASM. The token is
 obfuscated in the binary, not kept secret.
@@ -239,8 +241,7 @@ obfuscated in the binary, not kept secret.
 > proxy, and rate controls limit what callers can do. The on-demand package
 > route is also public, but accepts only packages currently present in the
 > configured Suwayomi extension catalog and is rate-limited to six package
-> downloads per client IP per hour. URL-based manga imports are separately
-> capped at 120 per client IP per hour. Keep the origin reachable only through
+> downloads per client IP and 30 total per hour. Keep the origin reachable only through
 > Cloudflare so the proxy-provided client IP used by these limits cannot be
 > spoofed by a direct request.
 

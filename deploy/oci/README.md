@@ -22,6 +22,13 @@ the only public listener and serves the Aidoku catalog at
    access to the origin blocked; forwarded client-IP headers are trusted for
    the per-IP abuse limits only under this condition.
 
+Before bringing up the bridge, ensure Suwayomi's host listener is bound to
+`127.0.0.1:4567`. For a native install, set `server.ip = "127.0.0.1"` in
+Suwayomi's `server.conf`. For a container, publish the port as
+`127.0.0.1:4567:4567`, never as `4567:4567`. Check with
+`sudo ss -lntp | grep ':4567'`; the host-facing address must be loopback.
+Do not add port 4567 to OCI ingress or the host firewall.
+
 ## Prepare the persistent directories
 
 ```sh
@@ -56,16 +63,18 @@ docker compose logs --tail=80 builder gateway caddy
 After Caddy obtains a certificate, verify that `https://$PUBLIC_DOMAIN/index.min.json` loads and
 shows catalog entries. Add that index URL in Aidoku. Aidoku's package download
 installs only the requested catalog entry; the builder permits six package
-downloads per client IP per hour. Manga URL recovery is separately limited to
-120 imports per client IP per hour.
+downloads per client IP and 30 total per hour, and runs one package build at a
+time with a 16-thread handler cap.
 
 ## Public routes
 
 - `/index.min.json` and `/icons/*`: static catalog metadata.
 - `/install/<catalog-package>.aix`: rate-limited on-demand installation and
   package generation for one listed extension.
-- `/api/graphql` and `/api/v1/...`: authenticated bridge operations, filtered
-  by the gateway's GraphQL and media-path allowlists.
+- `/api/graphql`: token-authenticated bridge operations, limited to the
+  approved read-only fetch/resolution mutations and source filter metadata.
+- `/api/v1/bridge/media/<signed-handle>`: token-authenticated images and pages;
+  all other Suwayomi routes are rejected by the gateway.
 
 Suwayomi itself remains at `127.0.0.1:4567`; do not add an OCI ingress rule
 for port 4567. The generated Aidoku index is separate from the iPad's Ikisaku
