@@ -39,7 +39,9 @@ fn main() {
     let fmt = |v: Vec<u8>| v.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",");
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("bridge_cfg.rs");
     let mut f = std::fs::File::create(out).unwrap();
-    writeln!(f, "pub const BRIDGE_API_SLOT: &[u8; {API_LEN}] = &[{}];", fmt(api_slot)).unwrap();
-    writeln!(f, "pub const BRIDGE_TOK_SLOT: &[u8; {TOK_LEN}] = &[{}];", fmt(tok_slot)).unwrap();
+    // Keep each slot as an exported data symbol. A const array is folded into
+    // the runtime reader and its marker bytes disappear from the final WASM.
+    writeln!(f, "#[used]\n#[no_mangle]\npub static BRIDGE_API_SLOT: [u8; {API_LEN}] = [{}];", fmt(api_slot)).unwrap();
+    writeln!(f, "#[used]\n#[no_mangle]\npub static BRIDGE_TOK_SLOT: [u8; {TOK_LEN}] = [{}];", fmt(tok_slot)).unwrap();
     println!("cargo:rerun-if-changed=build.rs");
 }

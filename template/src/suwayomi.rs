@@ -61,7 +61,7 @@ fn is_marker(v: &[u8]) -> bool {
 }
 
 pub fn api_base() -> String {
-    match read_slot(BRIDGE_API_SLOT).filter(|v| !is_marker(v)) {
+    match read_slot(&BRIDGE_API_SLOT).filter(|v| !is_marker(v)) {
         Some(v) => String::from_utf8(v.to_vec()).unwrap_or_default(),
         None => String::new(),
     }
@@ -70,7 +70,7 @@ pub fn api_base() -> String {
 /// Deployment token (XORed with the API bytes, same scheme at compile and
 /// patch time). None when unset or undecodable. Deterrent, not secret.
 pub fn token(api: &str) -> Option<String> {
-    let raw = read_slot(BRIDGE_TOK_SLOT)?;
+    let raw = read_slot(&BRIDGE_TOK_SLOT)?;
     if raw.is_empty() || is_marker(raw) {
         return None;
     }
