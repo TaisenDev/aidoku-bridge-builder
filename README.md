@@ -144,7 +144,7 @@ patches its own config at container startup from runtime env:
 | Variable | Required | Default | Description |
 | --- | :---: | --- | --- |
 | `STATIC_URL` | **Yes** | — | Public base serving this repo (index + packages). Doubles as the API default. |
-| `API_URL` | No | `STATIC_URL` + `/api` | Public gateway base baked into the wasm (separate host allowed). |
+| `API_URL` | No | `STATIC_URL` | Public gateway base baked into the wasm (separate host allowed). |
 | `TOKEN` | **Yes** | — | Random bearer token baked into the WASM. Must match `GATEWAY_TOKEN`; at least 32 characters. |
 | `GATEWAY_TOKEN` | **Yes** | — | Gateway's matching bearer token. The gateway fails closed if absent. |
 | `INSTALL_HOST` / `INSTALL_PORT` | No | `127.0.0.1:8081` | Private builder endpoint used by the reverse proxy for on-demand `.aix` downloads. |

@@ -51,7 +51,7 @@ LANGUAGES = [l.strip().lower() for l in os.environ.get("LANGUAGES", "all").split
 BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/tmp/bridge.wasm"))
 BRIDGE_STOCK = Path("/wasm-stock/bridge.wasm")
 API_URL = os.environ.get("API_URL", "").rstrip("/")
-API_BASE_URL = API_URL or (STATIC_URL + "/api")
+API_BASE_URL = API_URL or STATIC_URL
 TOKEN = os.environ.get("TOKEN", "")
 GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "")
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
@@ -59,7 +59,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 INSTALL_HOST = os.environ.get("INSTALL_HOST", "127.0.0.1")
 INSTALL_PORT = int(os.environ.get("INSTALL_PORT", "8081"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 14
+TEMPLATE_VERSION = 15
 
 API_SLOT_LEN = 256
 TOK_SLOT_LEN = 128
