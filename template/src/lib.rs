@@ -18,7 +18,10 @@ impl Bridge {
     }    fn cfg(&self) -> Result<(String, Option<String>, String)> {
         let src = defaults_get::<String>("sourceId").filter(|s| !s.is_empty())
             .ok_or(aidoku::AidokuError::Message(String::from("Missing source configuration")))?;
-        let base = suwayomi::api_base();
+        let base = defaults_get::<String>("gatewayUrl")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(suwayomi::api_base);
+        let base = base.trim_end_matches('/').to_string();
         if base.is_empty() {
             return Err(error!("gateway URL not configured"));
         }

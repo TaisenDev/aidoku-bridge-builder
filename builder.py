@@ -51,6 +51,7 @@ LANGUAGES = [l.strip().lower() for l in os.environ.get("LANGUAGES", "all").split
 BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/tmp/bridge.wasm"))
 BRIDGE_STOCK = Path("/wasm-stock/bridge.wasm")
 API_URL = os.environ.get("API_URL", "").rstrip("/")
+API_BASE_URL = API_URL or (STATIC_URL + "/api")
 TOKEN = os.environ.get("TOKEN", "")
 GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "")
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
@@ -58,7 +59,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 INSTALL_HOST = os.environ.get("INSTALL_HOST", "127.0.0.1")
 INSTALL_PORT = int(os.environ.get("INSTALL_PORT", "8081"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 13
+TEMPLATE_VERSION = 14
 
 API_SLOT_LEN = 256
 TOK_SLOT_LEN = 128
@@ -180,14 +181,20 @@ def make_icon(src_url: str) -> bytes:
     return buf.getvalue()
 
 
-def settings_json(source_id: str) -> str:
-    # Zero user-facing configuration: everything else is compiled into the wasm.
-    return (
-        '[\n  { "type": "group", "title": "Source", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
-        f'    {{ "type": "text", "key": "sourceId", "title": "Suwayomi Source ID", "default": "{source_id}" }}\n'
-        "  ]}\n]"
+def settings_json(source_id: str, gateway_url: str) -> str:
+    # Pre-fill both values so Aidoku can read deployment config at runtime.
+    return json.dumps(
+        [{
+            "type": "group",
+            "title": "Source",
+            "footer": "Preconfigurado automáticamente, no tocar.",
+            "items": [
+                {"type": "text", "key": "sourceId", "title": "Suwayomi Source ID", "default": source_id},
+                {"type": "text", "key": "gatewayUrl", "title": "Gateway URL", "default": gateway_url},
+            ],
+        }],
+        ensure_ascii=False,
     )
-
 
 def source_json(bridge_id: str, name: str, site_url: str, lang: str, version: int) -> str:
     return json.dumps(
@@ -231,7 +238,7 @@ def build_aix(
     (work / "res" / "source.json").write_text(
         source_json(bridge_id, name, site_url, lang, version), encoding="utf-8"
     )
-    (work / "res" / "settings.json").write_text(settings_json(source_id), encoding="utf-8")
+    (work / "res" / "settings.json").write_text(settings_json(source_id, API_BASE_URL), encoding="utf-8")
     (work / "res" / "icon.png").write_bytes(icon_bytes)
     (work / "source.wasm").write_bytes(wasm_bytes)
     aix_name = f"{bridge_id}-v{version}.aix"
@@ -562,7 +569,7 @@ if __name__ == "__main__":
 
     REPO_DIR.mkdir(parents=True, exist_ok=True)
     (REPO_DIR / "icons").mkdir(exist_ok=True)
-    api = API_URL or (STATIC_URL + "/api")
+    api = API_BASE_URL
     if not STATIC_URL.startswith("https://") or not api.startswith("https://"):
         print("FATAL: STATIC_URL and API_URL must use HTTPS", flush=True)
         sys.exit(1)
