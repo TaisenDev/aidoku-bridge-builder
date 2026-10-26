@@ -491,7 +491,11 @@ def _install_catalog_package(pkg_name: str) -> bytes:
                 for key, value in state.items()
                 if key != "_package_ids" and isinstance(value, dict)
             }
-            bridge_id = catalog_bridge_id(ext, occupied)
+            # If the package was already installed before this builder version,
+            # keep the bridge ID it has already published instead of turning a
+            # package download into a source-ID change for Aidoku.
+            existing = state.get(source["id"], {})
+            bridge_id = existing.get("bridge") or catalog_bridge_id(ext, occupied)
             package_ids[pkg_name] = {"sourceId": source["id"], "bridge": bridge_id}
         save_state(state)
 
