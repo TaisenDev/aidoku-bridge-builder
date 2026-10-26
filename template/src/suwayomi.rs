@@ -60,7 +60,7 @@ fn is_marker(v: &[u8]) -> bool {
     v.starts_with(b"__BRIDGE_")
 }
 
-pub fn api_base() -> Result<String, &'static str> {
+pub fn api_base() -> core::result::Result<String, &'static str> {
     let raw = read_slot(&BRIDGE_API_SLOT).ok_or("API slot invalid")?;
     if raw.is_empty() || is_marker(raw) {
         return Err("API slot is empty or still a placeholder");
@@ -70,7 +70,7 @@ pub fn api_base() -> Result<String, &'static str> {
 
 /// Deployment token (XORed with the API bytes, same scheme at compile and
 /// patch time). Errors identify only the failed stage, never the value.
-pub fn token(api: &str) -> Result<String, &'static str> {
+pub fn token(api: &str) -> core::result::Result<String, &'static str> {
     let raw = read_slot(&BRIDGE_TOK_SLOT).ok_or("token slot invalid")?;
     if raw.is_empty() {
         return Err("token slot is empty");
