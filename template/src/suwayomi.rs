@@ -82,8 +82,8 @@ pub fn token(api: &str) -> Option<String> {
     String::from_utf8(clr).ok().filter(|s| !s.is_empty())
 }
 
-pub fn bearer(tok: &Option<String>) -> Option<String> {
-    tok.as_deref().filter(|s| !s.is_empty()).map(|t| format!("Bearer {t}"))
+pub fn token_value(tok: &Option<String>) -> Option<&str> {
+    tok.as_deref().filter(|s| !s.is_empty())
 }
 
 fn gql<T: serde::de::DeserializeOwned>(base: &str, tok: &Option<String>, query: &str) -> Result<T> {
@@ -94,7 +94,7 @@ fn gql<T: serde::de::DeserializeOwned>(base: &str, tok: &Option<String>, query: 
     let mut req = Request::post(&url).map_err(|e| error!("req: {:?}", e))?;
     req.set_header("Content-Type", "application/json");
     req.set_header("Accept", "application/json");
-    if let Some(a) = bearer(tok) { req.set_header("Authorization", &a); }
+    if let Some(t) = token_value(tok) { req.set_header("X-Bridge-Token", t); }
     req.set_body(&body);
     let g: Gql<T> = req.send().map_err(|e| error!("send: {:?}", e))?
         .get_json_owned().map_err(|e| error!("parse: {:?}", e))?;

@@ -188,7 +188,7 @@ impl ImageRequestProvider for Bridge {
         let (base, tok, _s) = self.cfg().unwrap_or((String::from(""), None, String::from("")));
         let mut req = Request::get(&url).map_err(|e| error!("{:?}", e))?;
         if !base.is_empty() && url.starts_with(base.as_str()) {
-            if let Some(a) = suwayomi::bearer(&tok) { req.set_header("Authorization", &a); }
+            if let Some(t) = suwayomi::token_value(&tok) { req.set_header("X-Bridge-Token", t); }
             req.set_header("Referer", &base);
         }
         Ok(req)

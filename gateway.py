@@ -57,16 +57,20 @@ ALLOWED_MEDIA_PATH = re.compile(
 
 
 def check_token(handler: BaseHTTPRequestHandler) -> bool:
+    custom = handler.headers.get("X-Bridge-Token")
     auth = handler.headers.get("Authorization", "")
-    if not auth:
-        print("auth rejected: Authorization header missing", flush=True)
+    if custom is not None:
+        supplied = custom
+    elif auth.startswith("Bearer "):
+        supplied = auth[7:]
+    elif not auth:
+        print("auth rejected: token headers missing", flush=True)
         return False
-    if not auth.startswith("Bearer "):
+    else:
         print("auth rejected: unsupported Authorization scheme", flush=True)
         return False
-    supplied = auth[7:]
     if not hmac.compare_digest(supplied, GATEWAY_TOKEN):
-        print(f"auth rejected: bearer mismatch (length={len(supplied)})", flush=True)
+        print(f"auth rejected: token mismatch (length={len(supplied)})", flush=True)
         return False
     return True
 
