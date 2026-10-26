@@ -3,6 +3,7 @@
 import base64
 import hmac
 import ipaddress
+import io
 import json
 import os
 import re
@@ -15,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from graphql import OperationType, parse
 from graphql.language.ast import FieldNode, InlineFragmentNode, OperationDefinitionNode
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "")
 SUWAYOMI_URL = os.environ.get("SUWAYOMI_URL", "http://suwayomi:4567").rstrip("/")
@@ -26,6 +28,12 @@ BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 MAX_GRAPHQL_BODY = 64 * 1024
 MAX_GRAPHQL_RESPONSE = 8 * 1024 * 1024
 MAX_MEDIA_RESPONSE = 16 * 1024 * 1024
+MAX_PAGE_PIXELS = 50_000_000
+MAX_PAGE_TILES = 64
+PAGE_TILE_WIDTH = 896
+PAGE_TILE_HEIGHT = 1600
+PAGE_TILE_CACHE_BYTES = 96 * 1024 * 1024
+PAGE_TILE_CACHE_SECONDS = 1800
 MAX_GRAPHQL_DEPTH = 14
 MAX_GRAPHQL_FIELDS = 300
 MAX_IN_FLIGHT = 48
@@ -36,6 +44,9 @@ MEDIA_RATE = (300 / 60, 60)
 GLOBAL_GRAPHQL_RATE = (600 / 60, 60)
 GLOBAL_MEDIA_RATE = (1800 / 60, 240)
 MEDIA_PATH = re.compile(r"^/api/v1/bridge/media/[A-Za-z0-9_-]{20,32768}\.[A-Za-z0-9_-]{20,128}$")
+PAGE_ASSETS_PATH = re.compile(r"^/api/v1/bridge/page-assets/(?P<handle>[A-Za-z0-9_-]{20,32768}\.[A-Za-z0-9_-]{20,128})$")
+PAGE_TILE_PATH = re.compile(r"^/api/v1/bridge/page-tile/(?P<handle>[A-Za-z0-9_-]{20,32768}\.[A-Za-z0-9_-]{20,128})/(?P<index>[0-9]{1,2})$")
+Image.MAX_IMAGE_PIXELS = MAX_PAGE_PIXELS
 ALLOWED_FIELDS = {
     "source",
     "bridgeFetchSourceManga",
@@ -48,6 +59,76 @@ _TOKEN_LOCK = threading.Lock()
 _BUCKETS: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
 MAX_RATE_BUCKETS = 8192
 _SLOTS = threading.BoundedSemaphore(MAX_IN_FLIGHT)
+_IMAGE_SLOTS = threading.BoundedSemaphore(2)
+_PAGE_TILE_LOCK = threading.Lock()
+_PAGE_TILES: OrderedDict[str, tuple[float, list[bytes], int, int, int]] = OrderedDict()
+_PAGE_TILE_BYTES = 0
+
+
+def encode_page_tiles(data: bytes) -> tuple[int, int, list[bytes]]:
+    """Downscale to an iPad-friendly width and split long pages into transient JPEG tiles."""
+    with Image.open(io.BytesIO(data)) as opened:
+        image = ImageOps.exif_transpose(opened)
+        if image.width <= 0 or image.height <= 0 or image.width * image.height > MAX_PAGE_PIXELS:
+            raise ValueError("image dimensions exceed the page limit")
+        if "A" in image.getbands():
+            rgba = image.convert("RGBA")
+            flattened = Image.new("RGB", rgba.size, "white")
+            flattened.paste(rgba, mask=rgba.getchannel("A"))
+            image = flattened
+        else:
+            image = image.convert("RGB")
+        if image.width > PAGE_TILE_WIDTH:
+            height = max(1, round(image.height * PAGE_TILE_WIDTH / image.width))
+            image = image.resize((PAGE_TILE_WIDTH, height), Image.Resampling.LANCZOS)
+        width, height = image.size
+        count = (height + PAGE_TILE_HEIGHT - 1) // PAGE_TILE_HEIGHT
+        if count < 1 or count > MAX_PAGE_TILES:
+            raise ValueError("page is too tall to optimize safely")
+        tiles = []
+        for y in range(0, height, PAGE_TILE_HEIGHT):
+            tile = image.crop((0, y, width, min(height, y + PAGE_TILE_HEIGHT)))
+            out = io.BytesIO()
+            tile.save(out, format="JPEG", quality=88, optimize=False, progressive=False)
+            tiles.append(out.getvalue())
+        image.close()
+        return width, height, tiles
+
+
+def cache_page_tiles(handle: str, width: int, height: int, tiles: list[bytes]) -> None:
+    global _PAGE_TILE_BYTES
+    size = sum(len(tile) for tile in tiles)
+    now = time.monotonic()
+    with _PAGE_TILE_LOCK:
+        for key, item in list(_PAGE_TILES.items()):
+            if item[0] <= now:
+                _PAGE_TILE_BYTES -= item[2]
+                del _PAGE_TILES[key]
+        old = _PAGE_TILES.pop(handle, None)
+        if old:
+            _PAGE_TILE_BYTES -= old[2]
+        if size > PAGE_TILE_CACHE_BYTES:
+            return
+        while _PAGE_TILES and _PAGE_TILE_BYTES + size > PAGE_TILE_CACHE_BYTES:
+            _, evicted = _PAGE_TILES.popitem(last=False)
+            _PAGE_TILE_BYTES -= evicted[2]
+        _PAGE_TILES[handle] = (now + PAGE_TILE_CACHE_SECONDS, tiles, size, width, height)
+        _PAGE_TILE_BYTES += size
+
+
+def get_cached_page_tiles(handle: str):
+    now = time.monotonic()
+    with _PAGE_TILE_LOCK:
+        item = _PAGE_TILES.get(handle)
+        if not item:
+            return None
+        if item[0] <= now:
+            global _PAGE_TILE_BYTES
+            _PAGE_TILE_BYTES -= item[2]
+            del _PAGE_TILES[handle]
+            return None
+        _PAGE_TILES.move_to_end(handle)
+        return item
 
 
 def check_token(handler: BaseHTTPRequestHandler) -> bool:
@@ -114,9 +195,15 @@ def _document_shape_is_allowed(query: str) -> bool:
     allowed_children = {
         "source": {"filters"},
         "filters": {"__typename"},
+        "HeaderFilter": {"name"},
+        "SeparatorFilter": {"name"},
         "CheckBoxFilter": {"name", "default"},
         "SelectFilter": {"name", "default", "values"},
-        "TextFilter": {"name"},
+        "TextFilter": {"name", "default"},
+        "TriStateFilter": {"name", "default"},
+        "SortFilter": {"name", "default", "values"},
+        "GroupFilter": {"name", "filters"},
+        "default": {"index", "ascending"},
         "bridgeFetchSourceManga": {"mangas", "hasNextPage"},
         "mangas": {"id", "sourceId", "url", "realUrl", "title", "thumbnailUrl", "author", "artist", "description", "genre", "status"},
         "bridgeFetchMangaAndChapters": {"manga", "chapters"},
@@ -136,9 +223,12 @@ def _document_shape_is_allowed(query: str) -> bool:
             if count > MAX_GRAPHQL_FIELDS:
                 return False
             if isinstance(item, InlineFragmentNode):
-                # Only the three known source filter variants are valid fragments.
+                # Only known source filter variants are valid fragments.
                 type_name = item.type_condition.name.value if item.type_condition else ""
-                if parent != "filters" or type_name not in {"CheckBoxFilter", "SelectFilter", "TextFilter"} or item.directives:
+                if parent != "filters" or type_name not in {
+                    "HeaderFilter", "SeparatorFilter", "CheckBoxFilter", "SelectFilter",
+                    "TextFilter", "TriStateFilter", "SortFilter", "GroupFilter",
+                } or item.directives:
                     return False
                 if not visit(item.selection_set, type_name, depth + 1):
                     return False
@@ -147,11 +237,15 @@ def _document_shape_is_allowed(query: str) -> bool:
                 return False
             name = item.name.value
             alias = item.alias.value if item.alias else None
-            if alias and not (
-                name == "default"
-                and ((parent == "CheckBoxFilter" and alias == "cbDefault")
-                     or (parent == "SelectFilter" and alias == "selDefault"))
-            ):
+            allowed_aliases = {
+                ("CheckBoxFilter", "default"): "cbDefault",
+                ("SelectFilter", "default"): "selDefault",
+                ("TextFilter", "default"): "textDefault",
+                ("TriStateFilter", "default"): "triDefault",
+                ("SortFilter", "default"): "sortDefault",
+                ("GroupFilter", "filters"): "groupFilters",
+            }
+            if alias and alias != allowed_aliases.get((parent, name)):
                 return False
             if name == "__typename":
                 if parent != "filters" or item.selection_set:
@@ -161,7 +255,16 @@ def _document_shape_is_allowed(query: str) -> bool:
                 return False
             if item.selection_set and not visit(item.selection_set, name, depth + 1):
                 return False
-            if not item.selection_set and name in allowed_children:
+            requires_selection = {
+                ("source", "filters"),
+                ("bridgeFetchSourceManga", "mangas"),
+                ("bridgeFetchMangaAndChapters", "manga"),
+                ("bridgeFetchMangaAndChapters", "chapters"),
+                ("bridgeResolveUrl", "manga"),
+                ("SortFilter", "default"),
+                ("GroupFilter", "filters"),
+            }
+            if not item.selection_set and (parent, name) in requires_selection:
                 return False
         return True
 
@@ -222,14 +325,49 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             _SLOTS.release()
 
 
+def page_assets_response(handle: str) -> tuple[int, bytes, str]:
+    cached = get_cached_page_tiles(handle)
+    if cached is None:
+        if not _IMAGE_SLOTS.acquire(blocking=False):
+            return 503, b'{"error":"image optimizer is busy"}', "application/json"
+        try:
+            code, image_data, content_type = forward(
+                "GET", f"/api/v1/bridge/media/{handle}", None, {"Accept": "image/*"}
+            )
+            if code != 200:
+                return code, image_data[:1024 * 1024], content_type
+            if not content_type.lower().startswith("image/"):
+                return 502, b'{"error":"source did not return an image"}', "application/json"
+            width, height, tiles = encode_page_tiles(image_data)
+            cache_page_tiles(handle, width, height, tiles)
+            cached = get_cached_page_tiles(handle)
+            if cached is None:
+                # A valid image larger than the bounded cache can still be served for this response.
+                cached = (time.monotonic() + PAGE_TILE_CACHE_SECONDS, tiles, sum(map(len, tiles)), width, height)
+        except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError):
+            return 502, b'{"error":"source image could not be optimized safely"}', "application/json"
+        finally:
+            _IMAGE_SLOTS.release()
+    _, tiles, _, width, height = cached
+    tile_info = []
+    for index, tile in enumerate(tiles):
+        tile_height = min(PAGE_TILE_HEIGHT, height - index * PAGE_TILE_HEIGHT)
+        tile_info.append({
+            "path": f"/api/v1/bridge/page-tile/{handle}/{index}",
+            "width": width,
+            "height": tile_height,
+        })
+    payload = json.dumps({"width": width, "height": height, "tiles": tile_info}, separators=(",", ":")).encode()
+    return 200, payload, "application/json"
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "bridge-gateway"
     sys_version = ""
 
     def log_message(self, fmt, *args):
         path = urllib.parse.urlsplit(self.path).path
-        if path.startswith("/api/v1/bridge/media/"):
-            path = "/api/v1/bridge/media/[signed-handle]"
+        if path.startswith("/api/v1/bridge/"):
+            path = "/api/v1/bridge/[signed-handle]"
         print(f"{self.command} {path} -> {fmt % args}", flush=True)
 
     def _send(self, code: int, body: bytes, ctype: str = "application/json"):
@@ -250,12 +388,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, b'{"ok":true}')
         if not check_token(self):
             return self._deny(401, "unauthorized")
-        if not MEDIA_PATH.fullmatch(path) or urllib.parse.urlsplit(self.path).query:
+        if urllib.parse.urlsplit(self.path).query:
+            return self._deny(404, "not found")
+        media_match = MEDIA_PATH.fullmatch(path)
+        assets_match = PAGE_ASSETS_PATH.fullmatch(path)
+        tile_match = PAGE_TILE_PATH.fullmatch(path)
+        if not (media_match or assets_match or tile_match):
             return self._deny(404, "not found")
         if (not allow_rate(client_key(self), "media", MEDIA_RATE)
                 or not allow_rate("global", "media", GLOBAL_MEDIA_RATE)):
             return self._deny(429, "media request rate exceeded")
-        code, body, ctype = forward("GET", path, None, dict(self.headers))
+        if assets_match:
+            code, body, ctype = page_assets_response(assets_match.group("handle"))
+        elif tile_match:
+            cached = get_cached_page_tiles(tile_match.group("handle"))
+            index = int(tile_match.group("index"))
+            if cached is None or index >= len(cached[1]):
+                return self._deny(410, "optimized page expired; reload the chapter page")
+            return self._send(200, cached[1][index], "image/jpeg")
+        else:
+            code, body, ctype = forward("GET", path, None, dict(self.headers))
         self._send(code, body, ctype)
 
     def do_POST(self):

@@ -303,6 +303,50 @@ def catalog_icon(ext: dict, bridge_id: str, version: int) -> str:
     return f"icons/{icon_name}"
 
 
+def ikisaku_catalog_data(exts: list[dict], sources: list[dict], icon_url_for) -> dict:
+    """Build Ikisaku's declarative catalog without publishing deployment credentials."""
+    by_package: dict[str, list[dict]] = {}
+    for source in sources:
+        package = (source.get("extension") or {}).get("pkgName", "")
+        if package:
+            by_package.setdefault(package, []).append(source)
+
+    occupied: set[str] = set()
+    entries = []
+    for ext in exts:
+        package = ext.get("pkgName", "")
+        lang = (ext.get("lang") or "").lower()
+        if not package or not want_lang(lang):
+            continue
+        extension_id = catalog_bridge_id(ext, occupied)
+        occupied.add(extension_id)
+        sources_for_package = sorted(
+            by_package.get(package, []),
+            key=lambda source: ((source.get("displayName") or source.get("name") or "").lower(), str(source.get("id", ""))),
+        )
+        entries.append({
+            "id": package,
+            "package": package,
+            "name": ext.get("name") or package,
+            "lang": lang,
+            "versionName": ext.get("versionName") or "",
+            "versionCode": int(ext.get("versionCode") or 0),
+            "iconURL": icon_url_for(ext, extension_id),
+            "isInstalled": bool(ext.get("isInstalled")),
+            "sources": [
+                {
+                    "sourceId": str(source.get("id") or ""),
+                    "name": source.get("displayName") or source.get("name") or package,
+                    "lang": (source.get("lang") or lang).lower(),
+                    "package": package,
+                }
+                for source in sources_for_package
+            ],
+        })
+    entries.sort(key=lambda item: (item["lang"], item["name"].lower(), item["package"]))
+    return {"name": "Ikisaku Extensions", "formatVersion": 1, "extensions": entries}
+
+
 def cycle() -> None:
     print("== cycle start ==", flush=True)
     wasm_bytes = BRIDGE_WASM.read_bytes()
@@ -407,11 +451,24 @@ def cycle() -> None:
     (REPO_DIR / "index.min.json").write_text(
         json.dumps({"name": "Suwayomi Bridges", "sources": index_entries}, ensure_ascii=False), encoding="utf-8"
     )
+    ikisaku_index = ikisaku_catalog_data(
+        exts,
+        sources,
+        lambda ext, extension_id: f"{STATIC_URL}/{catalog_icon(ext, extension_id, int(ext.get('versionCode') or 1) * 10 + TEMPLATE_VERSION)}",
+    )
+    (REPO_DIR / "index.ikisaku.json").write_text(
+        json.dumps(ikisaku_index, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+    )
     live_icons = {
         item["iconURL"][len(STATIC_URL) + 1:]
         for item in index_entries
         if item.get("iconURL", "").startswith(STATIC_URL + "/")
     }
+    live_icons.update(
+        item["iconURL"][len(STATIC_URL) + 1:]
+        for item in ikisaku_index["extensions"]
+        if item.get("iconURL", "").startswith(STATIC_URL + "/")
+    )
     for icon in (REPO_DIR / "icons").glob("*.png"):
         if str(icon.relative_to(REPO_DIR)).replace("\\", "/") not in live_icons:
             icon.unlink()
