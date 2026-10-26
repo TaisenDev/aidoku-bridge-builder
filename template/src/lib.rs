@@ -18,17 +18,18 @@ impl Bridge {
     }    fn cfg(&self) -> Result<(String, Option<String>, String)> {
         let src = defaults_get::<String>("sourceId").filter(|s| !s.is_empty())
             .ok_or(aidoku::AidokuError::Message(String::from("Missing source configuration")))?;
+        let embedded_base = suwayomi::api_base();
         let configured_base = defaults_get::<String>("gatewayUrl")
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(suwayomi::api_base);
+            .unwrap_or_else(|| embedded_base.clone());
         let configured_base = configured_base.trim_end_matches('/');
         // Older package settings may persist the former `/api` suffix.
-        // The bridge appends `/api/...` itself, and the token is salted by the root URL.
+        // The token is salted by the embedded deployment URL, independent of saved settings.
         let base = String::from(configured_base.strip_suffix("/api").unwrap_or(configured_base));
         if base.is_empty() {
             return Err(error!("gateway URL not configured"));
         }
-        let tok = suwayomi::token(&base);
+        let tok = suwayomi::token(&embedded_base);
         Ok((base, tok, src))
     }
     fn manga(m: &SmManga, base: &str, src: &str) -> Manga {
