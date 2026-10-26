@@ -60,26 +60,34 @@ fn is_marker(v: &[u8]) -> bool {
     v.starts_with(b"__BRIDGE_")
 }
 
-pub fn api_base() -> String {
-    match read_slot(&BRIDGE_API_SLOT).filter(|v| !is_marker(v)) {
-        Some(v) => String::from_utf8(v.to_vec()).unwrap_or_default(),
-        None => String::new(),
+pub fn api_base() -> Result<String, &'static str> {
+    let raw = read_slot(&BRIDGE_API_SLOT).ok_or("API slot invalid")?;
+    if raw.is_empty() || is_marker(raw) {
+        return Err("API slot is empty or still a placeholder");
     }
+    String::from_utf8(raw.to_vec()).map_err(|_| "API slot is not UTF-8")
 }
 
 /// Deployment token (XORed with the API bytes, same scheme at compile and
-/// patch time). None when unset or undecodable. Deterrent, not secret.
-pub fn token(api: &str) -> Option<String> {
-    let raw = read_slot(&BRIDGE_TOK_SLOT)?;
-    if raw.is_empty() || is_marker(raw) {
-        return None;
+/// patch time). Errors identify only the failed stage, never the value.
+pub fn token(api: &str) -> Result<String, &'static str> {
+    let raw = read_slot(&BRIDGE_TOK_SLOT).ok_or("token slot invalid")?;
+    if raw.is_empty() {
+        return Err("token slot is empty");
+    }
+    if is_marker(raw) {
+        return Err("token slot is still a placeholder");
     }
     let kb = api.as_bytes();
     if kb.is_empty() {
-        return None;
+        return Err("embedded API URL is empty");
     }
     let clr: Vec<u8> = raw.iter().enumerate().map(|(j, &x)| x ^ kb[j % kb.len()]).collect();
-    String::from_utf8(clr).ok().filter(|s| !s.is_empty())
+    let token = String::from_utf8(clr).map_err(|_| "decoded token is not UTF-8")?;
+    if token.is_empty() {
+        return Err("decoded token is empty");
+    }
+    Ok(token)
 }
 
 pub fn token_value(tok: &Option<String>) -> Option<&str> {

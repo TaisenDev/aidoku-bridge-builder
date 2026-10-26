@@ -59,7 +59,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 INSTALL_HOST = os.environ.get("INSTALL_HOST", "127.0.0.1")
 INSTALL_PORT = int(os.environ.get("INSTALL_PORT", "8081"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 19
+TEMPLATE_VERSION = 21
 
 API_SLOT_LEN = 256
 TOK_SLOT_LEN = 128
@@ -181,8 +181,8 @@ def make_icon(src_url: str) -> bytes:
     return buf.getvalue()
 
 
-def settings_json(source_id: str, gateway_url: str) -> str:
-    # Pre-fill both values so Aidoku can read deployment config at runtime.
+def settings_json(source_id: str) -> str:
+    # The deployment URL and token live in the generated WASM; Aidoku only needs the source ID.
     return json.dumps(
         [{
             "type": "group",
@@ -190,7 +190,6 @@ def settings_json(source_id: str, gateway_url: str) -> str:
             "footer": "Preconfigurado automáticamente, no tocar.",
             "items": [
                 {"type": "text", "key": "sourceId", "title": "Suwayomi Source ID", "default": source_id},
-                {"type": "text", "key": "gatewayUrl", "title": "Gateway URL", "default": gateway_url},
             ],
         }],
         ensure_ascii=False,
@@ -238,7 +237,7 @@ def build_aix(
     (work / "res" / "source.json").write_text(
         source_json(bridge_id, name, site_url, lang, version), encoding="utf-8"
     )
-    (work / "res" / "settings.json").write_text(settings_json(source_id, API_BASE_URL), encoding="utf-8")
+    (work / "res" / "settings.json").write_text(settings_json(source_id), encoding="utf-8")
     (work / "res" / "icon.png").write_bytes(icon_bytes)
     (work / "source.wasm").write_bytes(wasm_bytes)
     aix_name = f"{bridge_id}-v{version}.aix"

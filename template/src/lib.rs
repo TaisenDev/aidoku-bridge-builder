@@ -18,19 +18,17 @@ impl Bridge {
     }    fn cfg(&self) -> Result<(String, Option<String>, String)> {
         let src = defaults_get::<String>("sourceId").filter(|s| !s.is_empty())
             .ok_or(aidoku::AidokuError::Message(String::from("Missing source configuration")))?;
-        let embedded_base = suwayomi::api_base();
-        let configured_base = defaults_get::<String>("gatewayUrl")
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| embedded_base.clone());
-        let configured_base = configured_base.trim_end_matches('/');
-        // Older package settings may persist the former `/api` suffix.
-        // The token is salted by the embedded deployment URL, independent of saved settings.
+        let embedded_base = suwayomi::api_base()
+            .map_err(|reason| error!("deployment gateway URL unavailable: {}", reason))?;
+        // The deployment URL and token are embedded in this generated WASM.
+        // Only the source ID remains as a source setting.
+        let configured_base = embedded_base.trim_end_matches('/');
         let base = String::from(configured_base.strip_suffix("/api").unwrap_or(configured_base));
         if base.is_empty() {
             return Err(error!("gateway URL not configured"));
         }
         let tok = suwayomi::token(&embedded_base)
-            .ok_or_else(|| error!("deployment gateway token unavailable"))?;
+            .map_err(|reason| error!("deployment gateway token unavailable: {}", reason))?;
         Ok((base, Some(tok), src))
     }
     fn manga(m: &SmManga, base: &str, src: &str) -> Manga {
