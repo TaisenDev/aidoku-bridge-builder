@@ -36,6 +36,7 @@ import re
 import threading
 import time
 import zipfile
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
@@ -59,7 +60,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 INSTALL_HOST = os.environ.get("INSTALL_HOST", "127.0.0.1")
 INSTALL_PORT = int(os.environ.get("INSTALL_PORT", "8081"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 24
+TEMPLATE_VERSION = 25
 
 API_SLOT_LEN = 256
 TOK_SLOT_LEN = 128
@@ -67,9 +68,11 @@ API_MARKER = b"__BRIDGE_API_URL__"
 TOK_MARKER = b"__BRIDGE_TOKEN__"
 _CYCLE_LOCK = threading.RLock()
 _RATE_LOCK = threading.Lock()
-_INSTALL_REQUESTS: dict[str, list[float]] = {}
+_INSTALL_REQUESTS: OrderedDict[str, list[float]] = OrderedDict()
 MAX_INSTALLS_PER_HOUR = 6
+MAX_INSTALL_CLIENTS = 8192
 _INSTALL_LOCK = threading.Lock()
+_INSTALL_REQUEST_SLOTS = threading.BoundedSemaphore(1)
 
 
 def patch_wasm(api: str, token: str) -> None:
@@ -445,9 +448,13 @@ def _allow_install_request(client_key: str) -> bool:
         recent = [t for t in _INSTALL_REQUESTS.get(client_key, []) if t > cutoff]
         if len(recent) >= MAX_INSTALLS_PER_HOUR:
             _INSTALL_REQUESTS[client_key] = recent
+            _INSTALL_REQUESTS.move_to_end(client_key)
             return False
         recent.append(now)
         _INSTALL_REQUESTS[client_key] = recent
+        _INSTALL_REQUESTS.move_to_end(client_key)
+        while len(_INSTALL_REQUESTS) > MAX_INSTALL_CLIENTS:
+            _INSTALL_REQUESTS.popitem(last=False)
         return True
 
 
@@ -519,7 +526,7 @@ class InstallHandler(BaseHTTPRequestHandler):
     server_version = "bridge-installer"
 
     def log_message(self, fmt, *args):
-        print(f"install {self.client_address[0]} -> {fmt % args}", flush=True)
+        print("install endpoint request handled", flush=True)
 
     def _respond(self, status: int, body: bytes, content_type: str = "application/json"):
         self.send_response(status)
@@ -536,6 +543,8 @@ class InstallHandler(BaseHTTPRequestHandler):
             return self._respond(404, b'{"error":"not found"}')
         if not _allow_install_request(_request_client_key(self)):
             return self._respond(429, b'{"error":"installation rate limit reached"}')
+        if not _INSTALL_REQUEST_SLOTS.acquire(blocking=False):
+            return self._respond(503, b'{"error":"an installation is already running"}')
         try:
             package = _install_catalog_package(match.group(1))
         except KeyError:
@@ -543,6 +552,8 @@ class InstallHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"WARN on-demand install failed: {type(e).__name__}: {e}", flush=True)
             return self._respond(502, b'{"error":"could not build selected source"}')
+        finally:
+            _INSTALL_REQUEST_SLOTS.release()
         return self._respond(200, package, "application/octet-stream")
 
     def do_POST(self):
