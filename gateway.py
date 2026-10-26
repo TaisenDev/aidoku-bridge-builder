@@ -158,6 +158,9 @@ def forward(method: str, path: str, body: bytes | None, incoming: dict) -> tuple
     url = SUWAYOMI_URL + path
     forward_headers = {"accept", "user-agent", "range", "if-none-match", "if-modified-since"}
     headers = {k: v for k, v in incoming.items() if k.lower() in forward_headers}
+    if body is not None:
+        # GraphQL JSON is parsed by Suwayomi based on this header.
+        headers["Content-Type"] = "application/json"
     headers.update(server_auth())
     headers["Referer"] = SUWAYOMI_URL
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
