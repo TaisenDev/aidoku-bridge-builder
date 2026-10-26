@@ -45,15 +45,25 @@ pub struct AddByUrlPayload { pub status: Option<String>, pub message: Option<Str
 
 include!(concat!(env!("OUT_DIR"), "/bridge_cfg.rs"));
 
-fn read_slot(slot: &[u8]) -> Option<&[u8]> {
-    if slot.len() < 4 {
+fn read_slot<const N: usize>(slot: &[u8; N]) -> Option<Vec<u8>> {
+    if N < 4 {
         return None;
     }
-    let n = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]) as usize;
-    if n > slot.len() - 4 {
+    // The builder patches these bytes after compilation. Volatile loads stop
+    // LLVM from folding the immutable static's stock placeholder into code.
+    let mut header = [0u8; 4];
+    for (i, byte) in header.iter_mut().enumerate() {
+        *byte = unsafe { core::ptr::read_volatile(slot.as_ptr().add(i)) };
+    }
+    let n = u32::from_le_bytes(header) as usize;
+    if n > N - 4 {
         return None;
     }
-    Some(&slot[4..4 + n])
+    let mut value = Vec::with_capacity(n);
+    for i in 0..n {
+        value.push(unsafe { core::ptr::read_volatile(slot.as_ptr().add(4 + i)) });
+    }
+    Some(value)
 }
 
 fn is_marker(v: &[u8]) -> bool {
@@ -62,10 +72,10 @@ fn is_marker(v: &[u8]) -> bool {
 
 pub fn api_base() -> core::result::Result<String, &'static str> {
     let raw = read_slot(&BRIDGE_API_SLOT).ok_or("API slot invalid")?;
-    if raw.is_empty() || is_marker(raw) {
+    if raw.is_empty() || is_marker(&raw) {
         return Err("API slot is empty or still a placeholder");
     }
-    String::from_utf8(raw.to_vec()).map_err(|_| "API slot is not UTF-8")
+    String::from_utf8(raw).map_err(|_| "API slot is not UTF-8")
 }
 
 /// Deployment token (XORed with the API bytes, same scheme at compile and
@@ -75,7 +85,7 @@ pub fn token(api: &str) -> core::result::Result<String, &'static str> {
     if raw.is_empty() {
         return Err("token slot is empty");
     }
-    if is_marker(raw) {
+    if is_marker(&raw) {
         return Err("token slot is still a placeholder");
     }
     let kb = api.as_bytes();

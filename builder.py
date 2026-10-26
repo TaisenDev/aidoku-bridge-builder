@@ -59,7 +59,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 INSTALL_HOST = os.environ.get("INSTALL_HOST", "127.0.0.1")
 INSTALL_PORT = int(os.environ.get("INSTALL_PORT", "8081"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 22
+TEMPLATE_VERSION = 23
 
 API_SLOT_LEN = 256
 TOK_SLOT_LEN = 128
