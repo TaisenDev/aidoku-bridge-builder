@@ -1,49 +1,44 @@
 #!/usr/bin/env python3
 """bridge-builder: generate Aidoku .aix bridges (1 per Suwayomi source) + repo index.
 
-Reads installed extensions from Suwayomi via GraphQL, auto-installs the ones
-matching LANGUAGES, applies pending updates, and per source generates:
-  repo/<bridge>.aix  (= shared bridge.wasm + generated res/ + opaque 128 icon)
+Reads the Suwayomi catalog via GraphQL, installs a selected extension only
+when Aidoku requests its package, applies pending updates to installed
+extensions, and per source generates:
+  repo/<bridge>.aix  (= deployment wasm + generated res/ + opaque 128 icon)
   repo/index.min.json (Aidoku-style source list) + icons/
 
-WASM resolution (first hit wins):
-  1. $BRIDGE_WASM when it points to an existing non-empty file (user override)
-  2. /wasm/bridge.wasm baked into the image from a pinned template release
+The wasm is built for this deployment (API URL + optional token baked in);
+every bridge shares it and carries zero user-facing configuration (only the
+sourceId, pre-filled). Runtime traffic goes to the gateway, never to
+Suwayomi directly.
 
-Env:
-  SUWAYOMI_URL      internal URL, e.g. http://suwayomi:4567
-  SUWAYOMI_USER     server username (required). Used to talk to Suwayomi and
-                    baked as the runtime username in every bridge.
-  SUWAYOMI_PASS     server password (required). Sent to Suwayomi on every
-                    request; servers without auth simply ignore the header.
-                    Baked into bridges (obfuscated) only when BAKE_CREDENTIALS
-                    is true — otherwise type it once per bridge in Aidoku.
-  PUBLIC_SUWAYOMI_URL
-                    public URL baked into settings, e.g. https://suwayomi.example.com (required)
-  PUBLIC_REPO_BASE  e.g. https://aidoku.example.com for iconURL/downloadURL (required)
-  BAKE_CREDENTIALS  "true" to also bake SUWAYOMI_PASS (requires it set).
-                    Default false. Baked passwords are OBFUSCATED (obf1:), not
-                    encrypted: anyone holding the .aix plus the public template
-                    source can recover them. The gateway (password never baked)
-                    is the real fix.
-  LANGUAGES         "es" (default) | "es,en" | "all" ... Only matching sources
-                    get bridges. Extensions for other languages are left
-                    untouched on the server.
-  BRIDGE_WASM       override path to a user-supplied bridge.wasm template.
-                    Default /wasm/bridge.wasm (image-bundled, pinned release).
+Env (only STATIC_URL and SUWAYOMI_URL are effectively required; optionals
+may simply be omitted from compose):
+  STATIC_URL        public base serving this repo, e.g. https://aidoku.example.com (required)
+  SUWAYOMI_URL      internal URL, e.g. http://suwayomi:4567 (default set)
+  SUWAYOMI_USER / SUWAYOMI_PASS
+                    optional pair for builder -> Suwayomi auth. Omit both when
+                    Suwayomi runs without auth (private network). One without
+                    the other is a config error.
+  LANGUAGES         "all" (default) | "es" | "es,en" | "es,multi" ... Only
+                    matching catalog entries are published and installable.
   REPO_DIR          output dir. Default /repo
-  POLL_SECONDS      Default 3600.
+  POLL_SECONDS      seconds between cycles. Default 3600.
 """
 
 import base64
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import re
+import threading
 import time
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 from PIL import Image
@@ -51,32 +46,67 @@ from PIL import Image
 SUWAYOMI_URL = os.environ.get("SUWAYOMI_URL", "http://suwayomi:4567")
 SUWAYOMI_USER = os.environ.get("SUWAYOMI_USER", "")
 SUWAYOMI_PASS = os.environ.get("SUWAYOMI_PASS", "")
-PUBLIC_SUWAYOMI_URL = os.environ.get("PUBLIC_SUWAYOMI_URL", "").rstrip("/")
-PUBLIC_REPO_BASE = os.environ.get("PUBLIC_REPO_BASE", "").rstrip("/")
-BAKE_CREDENTIALS = os.environ.get("BAKE_CREDENTIALS", "false").lower() in ("1", "true", "yes")
-LANGUAGES = [l.strip().lower() for l in os.environ.get("LANGUAGES", "es").split(",") if l.strip()]
-BRIDGE_WASM = Path(os.environ.get("BRIDGE_WASM", "/wasm/bridge.wasm"))
+STATIC_URL = os.environ.get("STATIC_URL", "").rstrip("/")
+LANGUAGES = [l.strip().lower() for l in os.environ.get("LANGUAGES", "all").split(",") if l.strip()]
+BRIDGE_WASM = Path("/wasm/bridge.wasm")
+BRIDGE_STOCK = Path("/wasm-stock/bridge.wasm")
+API_URL = os.environ.get("API_URL", "").rstrip("/")
+TOKEN = os.environ.get("TOKEN", "")
+GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "")
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
+INSTALL_HOST = os.environ.get("INSTALL_HOST", "127.0.0.1")
+INSTALL_PORT = int(os.environ.get("INSTALL_PORT", "8081"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 8
+TEMPLATE_VERSION = 11
 
-OBF_TAG = "obf1:"
-OBF_SALT = "taisendev-obf1"
+API_SLOT_LEN = 256
+TOK_SLOT_LEN = 128
+API_MARKER = b"__BRIDGE_API_URL__"
+TOK_MARKER = b"__BRIDGE_TOKEN__"
+_CYCLE_LOCK = threading.RLock()
+_RATE_LOCK = threading.Lock()
+_INSTALL_REQUESTS: dict[str, list[float]] = {}
+MAX_INSTALLS_PER_HOUR = 6
+_INSTALL_LOCK = threading.Lock()
 
 
-def obf_nonce() -> str:
-    seed = f"{PUBLIC_SUWAYOMI_URL}:{SUWAYOMI_USER}:{OBF_SALT}".encode()
-    return hashlib.sha256(seed).hexdigest()[:16]
+def patch_wasm(api: str, token: str) -> None:
+    """Same-length patch of the stock wasm config slots. Idempotent, runs at
+    every startup (seconds); config changes apply on container recreate."""
+    if len(api.encode()) > 200 or len(token.encode()) > 96:
+        print("FATAL: API_URL (max 200B) or TOKEN (max 96B) too long", flush=True)
+        sys.exit(1)
+    try:
+        d = bytearray(BRIDGE_STOCK.read_bytes())
+    except Exception as e:
+        print(f"FATAL: cannot read stock wasm: {e}", flush=True)
+        sys.exit(1)
 
+    def fill(marker: bytes, total: int, payload: bytes) -> bool:
+        j = d.find(marker)
+        if j < 4:
+            return False
+        i = j - 4
+        if int.from_bytes(d[i:i + 4], "little") != len(marker):
+            return False  # not our slot layout; refuse to touch
+        if len(payload) + 4 > total:
+            return False
+        blob = len(payload).to_bytes(4, "little") + payload
+        d[i:i + total] = blob + b"\0" * (total - len(blob))
+        return True
 
-def obf_encode(secret: str) -> str:
-    nonce = obf_nonce()
-    key = hashlib.sha256(f"{nonce}:{PUBLIC_SUWAYOMI_URL}:{SUWAYOMI_USER}:{OBF_SALT}".encode()).digest()
-    raw = secret.encode()
-    x = bytes(b ^ key[i % len(key)] for i, b in enumerate(raw))
-    return f"{OBF_TAG}{nonce}.{base64.b64encode(x).decode()}"
-
+    api_b = api.encode()
+    if not fill(API_MARKER, API_SLOT_LEN, api_b):
+        print("FATAL: API marker missing or malformed; refusing to publish an unconfigured WASM", flush=True)
+        sys.exit(1)
+    tok_xor = bytes(b ^ api_b[j % len(api_b)] for j, b in enumerate(token.encode())) if token else b""
+    if not fill(TOK_MARKER, TOK_SLOT_LEN, tok_xor):
+        print("FATAL: token marker missing or malformed; refusing to publish an unconfigured WASM", flush=True)
+        sys.exit(1)
+    BRIDGE_WASM.parent.mkdir(parents=True, exist_ok=True)
+    BRIDGE_WASM.write_bytes(bytes(d))
+    print(f"patched deployment wasm (api={api}, token={'set' if token else 'open'})", flush=True)
 
 def suwayomi_auth() -> dict:
     if SUWAYOMI_USER:
@@ -106,7 +136,7 @@ def slugify(text: str) -> str:
 
 def fetch_all_extensions() -> list[dict]:
     data = gql(
-        "query { extensions(first: 5000) { nodes { pkgName name versionName versionCode lang isInstalled hasUpdate } } }"
+        "query { extensions(first: 5000) { nodes { pkgName name iconUrl versionName versionCode lang isInstalled hasUpdate } } }"
     )
     return data["extensions"]["nodes"]
 
@@ -151,20 +181,9 @@ def make_icon(src_url: str) -> bytes:
 
 
 def settings_json(source_id: str) -> str:
-    pw_item = (
-        '\n      { "type": "text", "key": "password", "title": "Password", "placeholder": "pass", "secure": true },'
-        if not BAKE_CREDENTIALS
-        else f'\n      {{ "type": "text", "key": "password", "title": "Password", "default": "{obf_encode(SUWAYOMI_PASS)}", "secure": true }},'
-    )
+    # Zero user-facing configuration: everything else is compiled into the wasm.
     return (
-        '[\n  { "type": "group", "title": "Server", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
-        f'    {{ "type": "text", "key": "serverUrl", "title": "Suwayomi Server URL", "default": "{PUBLIC_SUWAYOMI_URL}" }}\n'
-        "  ]},\n"
-        '  { "type": "group", "title": "Auth (Basic)", "footer": "Si cambias servidor o usuario, reescribe la contraseña.", "items": [\n'
-        f'    {{ "type": "text", "key": "username", "title": "Username", "default": "{SUWAYOMI_USER}" }},'
-        f"{pw_item}\n"
-        "  ]},\n"
-        '  { "type": "group", "title": "Source", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
+        '[\n  { "type": "group", "title": "Source", "footer": "Preconfigurado automáticamente, no tocar.", "items": [\n'
         f'    {{ "type": "text", "key": "sourceId", "title": "Suwayomi Source ID", "default": "{source_id}" }}\n'
         "  ]}\n]"
     )
@@ -244,7 +263,32 @@ def save_state(state: dict) -> None:
 
 
 def site_url_for(source: dict) -> str:
-    return PUBLIC_SUWAYOMI_URL
+    return STATIC_URL
+
+
+def catalog_bridge_id(ext: dict, occupied: set[str]) -> str:
+    lang = (ext.get("lang") or "und").lower()
+    stem = f"{lang}.{slugify(ext.get('name') or ext.get('pkgName') or 'extension')}"
+    pkg_name = ext.get("pkgName") or ext.get("name") or "extension"
+    suffix = hashlib.sha256(pkg_name.encode("utf-8")).hexdigest()[:6]
+    candidate = f"{stem}-{suffix}-bridge"
+    if candidate in occupied:
+        candidate = f"{stem}-{hashlib.sha256(pkg_name.encode('utf-8')).hexdigest()[:10]}-bridge"
+    return candidate
+
+
+def catalog_icon(ext: dict, bridge_id: str, version: int) -> str:
+    icon_name = f"{bridge_id}-catalog-v{version}.png"
+    icon_path = REPO_DIR / "icons" / icon_name
+    if not icon_path.exists():
+        try:
+            icon_bytes = make_icon(ext.get("iconUrl") or "")
+        except Exception as e:
+            print(f"WARN catalog icon {ext.get('pkgName')}: {e} (placeholder)", flush=True)
+            icon_bytes = placeholder_icon()
+        icon_path.parent.mkdir(parents=True, exist_ok=True)
+        icon_path.write_bytes(icon_bytes)
+    return f"icons/{icon_name}"
 
 
 def cycle() -> None:
@@ -260,23 +304,7 @@ def cycle() -> None:
     exts = fetch_all_extensions()
     by_pkg = {e["pkgName"]: e for e in exts}
 
-    # 1. auto-install missing extensions for wanted languages (bounded per cycle)
-    to_install = [
-        e["pkgName"]
-        for e in exts
-        if not e["isInstalled"] and want_lang(e.get("lang") or "")
-    ]
-    if to_install:
-        print(f"installing {len(to_install)} extensions...", flush=True)
-        for i in range(0, len(to_install), 10):
-            batch = to_install[i : i + 10]
-            try:
-                install_or_update(batch, update=False)
-                print(f"  installed batch {i // 10 + 1}", flush=True)
-            except Exception as e:
-                print(f"  WARN batch failed: {e}", flush=True)
-
-    # 2. update installed ones with updates available
+    # Update only extensions the user has already installed.
     to_update = [e["pkgName"] for e in exts if e["isInstalled"] and e.get("hasUpdate")]
     if to_update:
         print(f"updating {len(to_update)} extensions...", flush=True)
@@ -287,21 +315,29 @@ def cycle() -> None:
         exts = fetch_all_extensions()
         by_pkg = {e["pkgName"]: e for e in exts}
 
-    # 3. bridges per installed source (wanted langs)
+    # Build bridges for installed sources while retaining their existing IDs.
     sources = installed_sources()
     index_entries = []
     seen_ids: set[str] = set()
     live_aix: set[str] = set()
+    package_ids = state.get("_package_ids", {})
+    installed_packages: set[str] = set()
     for s in sources:
         lang = (s.get("lang") or "").lower()
         if not want_lang(lang):
             continue
         pkg = (s.get("extension") or {}).get("pkgName", "")
+        installed_packages.add(pkg)
         ext = by_pkg.get(pkg, {})
         version = int(ext.get("versionCode") or 1) * 10 + TEMPLATE_VERSION
-        base_slug = slugify(s.get("displayName") or s["name"])
-        bridge_id = f"{lang}.{base_slug}-bridge"
+        mapped = package_ids.get(pkg, {})
+        if mapped.get("sourceId") == s["id"] and mapped.get("bridge"):
+            bridge_id = mapped["bridge"]
+        else:
+            base_slug = slugify(s.get("displayName") or s["name"])
+            bridge_id = f"{lang}.{base_slug}-bridge"
         if bridge_id in seen_ids:
+            base_slug = slugify(s.get("displayName") or s["name"])
             bridge_id = f"{lang}.{base_slug}-{s['id'][-6:]}-bridge"
         seen_ids.add(bridge_id)
 
@@ -335,6 +371,20 @@ def cycle() -> None:
         index_entries.append(entry(bridge_id, s, version, aix_name, icon_rel, lang))
         print(f"built {bridge_id} v{version}", flush=True)
 
+    # Advertise uninstalled extension packages without installing their APKs.
+    # Aidoku's download URL installs only the selected, catalog-listed package.
+    for ext in exts:
+        pkg = ext.get("pkgName", "")
+        lang = (ext.get("lang") or "").lower()
+        if not pkg or pkg in installed_packages or not want_lang(lang):
+            continue
+        bridge_id = catalog_bridge_id(ext, seen_ids)
+        seen_ids.add(bridge_id)
+        version = int(ext.get("versionCode") or 1) * 10 + TEMPLATE_VERSION
+        icon_rel = catalog_icon(ext, bridge_id, version)
+        install_url = f"{STATIC_URL}/install/{quote(pkg, safe='')}.aix"
+        index_entries.append(entry(bridge_id, ext, version, "", icon_rel, lang, download_url=install_url))
+
     # prune stale bridges (source gone / lang disabled)
     for f in REPO_DIR.glob("*.aix"):
         if f.name not in live_aix:
@@ -345,21 +395,155 @@ def cycle() -> None:
     (REPO_DIR / "index.min.json").write_text(
         json.dumps({"name": "Suwayomi Bridges", "sources": index_entries}, ensure_ascii=False), encoding="utf-8"
     )
+    live_icons = {
+        item["iconURL"][len(STATIC_URL) + 1:]
+        for item in index_entries
+        if item.get("iconURL", "").startswith(STATIC_URL + "/")
+    }
+    for icon in (REPO_DIR / "icons").glob("*.png"):
+        if str(icon.relative_to(REPO_DIR)).replace("\\", "/") not in live_icons:
+            icon.unlink()
     save_state(state)
     print(f"== cycle done: {len(index_entries)} bridges ==", flush=True)
 
 
-def entry(bridge_id: str, s: dict, version: int, aix: str, icon_rel: str, lang: str) -> dict:
+def entry(bridge_id: str, s: dict, version: int, aix: str, icon_rel: str, lang: str, download_url: str | None = None) -> dict:
     return {
         "id": bridge_id,
         "name": f"{s.get('displayName') or s['name']} (Bridge)",
         "version": version,
-        "iconURL": f"{PUBLIC_REPO_BASE}/{icon_rel}" if PUBLIC_REPO_BASE else icon_rel,
-        "downloadURL": f"{PUBLIC_REPO_BASE}/{aix}" if PUBLIC_REPO_BASE else aix,
+        "iconURL": f"{STATIC_URL}/{icon_rel}",
+        "downloadURL": download_url or f"{STATIC_URL}/{aix}",
         "languages": [lang],
         "contentRating": 0,
         "minAppVersion": "0.7.0",
     }
+
+
+def _request_client_key(handler: BaseHTTPRequestHandler) -> str:
+    candidate = handler.headers.get("CF-Connecting-IP", "")
+    if not candidate:
+        candidate = handler.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+    if candidate:
+        try:
+            return str(ipaddress.ip_address(candidate))
+        except ValueError:
+            pass
+    return handler.client_address[0]
+
+
+def _allow_install_request(client_key: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - 3600
+    with _RATE_LOCK:
+        recent = [t for t in _INSTALL_REQUESTS.get(client_key, []) if t > cutoff]
+        if len(recent) >= MAX_INSTALLS_PER_HOUR:
+            _INSTALL_REQUESTS[client_key] = recent
+            return False
+        recent.append(now)
+        _INSTALL_REQUESTS[client_key] = recent
+        return True
+
+
+def _install_catalog_package(pkg_name: str) -> bytes:
+    """Install only a currently catalog-listed package and return its first source AIX."""
+    with _INSTALL_LOCK, _CYCLE_LOCK:
+        refresh_catalog()
+        extensions = fetch_all_extensions()
+        ext = next((e for e in extensions if e.get("pkgName") == pkg_name), None)
+        if not ext or not want_lang(ext.get("lang") or ""):
+            raise KeyError("package is not in the enabled extension catalog")
+
+        if not ext.get("isInstalled"):
+            install_or_update([pkg_name], update=False)
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                extensions = fetch_all_extensions()
+                ext = next((e for e in extensions if e.get("pkgName") == pkg_name), None)
+                sources = [
+                    s for s in installed_sources()
+                    if (s.get("extension") or {}).get("pkgName") == pkg_name
+                ]
+                if ext and ext.get("isInstalled") and sources:
+                    break
+                time.sleep(2)
+            else:
+                raise RuntimeError("Suwayomi did not finish installing the selected extension")
+        else:
+            sources = [
+                s for s in installed_sources()
+                if (s.get("extension") or {}).get("pkgName") == pkg_name
+            ]
+        if not sources:
+            raise RuntimeError("the selected extension exposes no installed sources")
+
+        sources.sort(key=lambda s: (s.get("name") or "").lower() + str(s.get("id", "")))
+        source = sources[0]
+        state = load_state()
+        package_ids = state.setdefault("_package_ids", {})
+        mapping = package_ids.get(pkg_name)
+        if mapping and any(s.get("id") == mapping.get("sourceId") for s in sources):
+            source = next(s for s in sources if s.get("id") == mapping["sourceId"])
+            bridge_id = mapping.get("bridge") or catalog_bridge_id(ext, set())
+        else:
+            occupied = {
+                str(value.get("bridge"))
+                for key, value in state.items()
+                if key != "_package_ids" and isinstance(value, dict)
+            }
+            bridge_id = catalog_bridge_id(ext, occupied)
+            package_ids[pkg_name] = {"sourceId": source["id"], "bridge": bridge_id}
+        save_state(state)
+
+        # cycle() publishes metadata for all newly visible sources and uses the
+        # saved package mapping to keep this first package ID stable.
+        cycle()
+        state = load_state()
+        built = state.get(source["id"], {}).get("aix")
+        if not built or not (REPO_DIR / built).is_file():
+            raise RuntimeError("builder did not create the selected Aidoku package")
+        return (REPO_DIR / built).read_bytes()
+
+
+class InstallHandler(BaseHTTPRequestHandler):
+    server_version = "bridge-installer"
+
+    def log_message(self, fmt, *args):
+        print(f"install {self.client_address[0]} -> {fmt % args}", flush=True)
+
+    def _respond(self, status: int, body: bytes, content_type: str = "application/json"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        match = re.fullmatch(r"/install/([A-Za-z0-9_.-]{1,200})\.aix", self.path)
+        if not match:
+            return self._respond(404, b'{"error":"not found"}')
+        if not _allow_install_request(_request_client_key(self)):
+            return self._respond(429, b'{"error":"installation rate limit reached"}')
+        try:
+            package = _install_catalog_package(match.group(1))
+        except KeyError:
+            return self._respond(404, b'{"error":"package is not available"}')
+        except Exception as e:
+            print(f"WARN on-demand install failed: {type(e).__name__}: {e}", flush=True)
+            return self._respond(502, b'{"error":"could not build selected source"}')
+        return self._respond(200, package, "application/octet-stream")
+
+    def do_POST(self):
+        return self._respond(405, b'{"error":"method not allowed"}')
+
+
+def start_install_server() -> None:
+    server = ThreadingHTTPServer((INSTALL_HOST, INSTALL_PORT), InstallHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, name="aidoku-install-server", daemon=True).start()
+    print(f"on-demand package endpoint listening on {INSTALL_HOST}:{INSTALL_PORT}", flush=True)
 
 
 def placeholder_icon() -> bytes:
@@ -374,6 +558,14 @@ if __name__ == "__main__":
 
     REPO_DIR.mkdir(parents=True, exist_ok=True)
     (REPO_DIR / "icons").mkdir(exist_ok=True)
+    api = API_URL or (STATIC_URL + "/api")
+    if not STATIC_URL.startswith("https://") or not api.startswith("https://"):
+        print("FATAL: STATIC_URL and API_URL must use HTTPS", flush=True)
+        sys.exit(1)
+    if len(TOKEN) < 32 or TOKEN != GATEWAY_TOKEN:
+        print("FATAL: TOKEN and GATEWAY_TOKEN must match and contain at least 32 characters", flush=True)
+        sys.exit(1)
+    patch_wasm(api, TOKEN)
     if not BRIDGE_WASM.exists() or BRIDGE_WASM.stat().st_size == 0:
         print(f"FATAL: missing template wasm at {BRIDGE_WASM}", flush=True)
         sys.exit(1)
@@ -381,22 +573,19 @@ if __name__ == "__main__":
         print(f"FATAL: {BRIDGE_WASM} is not a wasm binary", flush=True)
         sys.exit(1)
     missing = [k for k, v in {
-        "PUBLIC_SUWAYOMI_URL": PUBLIC_SUWAYOMI_URL,
-        "PUBLIC_REPO_BASE": PUBLIC_REPO_BASE,
-        "SUWAYOMI_USER": SUWAYOMI_USER,
-        "SUWAYOMI_PASS": SUWAYOMI_PASS,
+        "STATIC_URL": STATIC_URL,
     }.items() if not v]
-    if BAKE_CREDENTIALS and not SUWAYOMI_PASS:
-        missing.append("SUWAYOMI_PASS (required when BAKE_CREDENTIALS=true)")
+    if bool(SUWAYOMI_USER) != bool(SUWAYOMI_PASS):
+        missing.append("SUWAYOMI_USER + SUWAYOMI_PASS (both or neither)")
     if missing:
         print(f"FATAL: missing required env: {', '.join(missing)}", flush=True)
         sys.exit(1)
-    if not PUBLIC_REPO_BASE:
-        print("WARN: PUBLIC_REPO_BASE empty -> relative URLs in index", flush=True)
+    start_install_server()
     interval = POLL_SECONDS
     while True:
         try:
-            cycle()
+            with _CYCLE_LOCK:
+                cycle()
         except Exception as e:
             print(f"ERROR cycle: {e}", flush=True)
         print(f"sleep {interval}s", flush=True)

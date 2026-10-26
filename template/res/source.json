@@ -1,0 +1,16 @@
+{
+  "info": {
+    "id": "suwayomi-bridge",
+    "name": "Suwayomi Bridge",
+    "version": 1,
+    "url": "https://github.com/Suwayomi/Suwayomi-Server",
+    "contentRating": 0,
+    "languages": ["all"],
+    "minAppVersion": "0.7.0"
+  },
+  "listings": [
+    { "id": "popular", "name": "Popular", "kind": 0 },
+    { "id": "latest", "name": "Latest", "kind": 0 }
+  ],
+  "config": { "supportsTagSearch": false }
+}

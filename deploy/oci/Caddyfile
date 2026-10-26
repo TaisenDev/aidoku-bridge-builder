@@ -1,0 +1,19 @@
+suwayomi.example.invalid {
+	encode gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000"
+	}
+
+	@bridge_api path /api/graphql /api/v1/*
+	reverse_proxy @bridge_api 127.0.0.1:8080
+
+	@install path /install/*
+	reverse_proxy @install 127.0.0.1:8081
+
+	root * /srv/repo
+	hide .builder-state.json .work
+	file_server
+}

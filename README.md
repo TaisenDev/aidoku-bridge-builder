@@ -19,23 +19,23 @@
   <a href="https://github.com/TaisenDev/aidoku-bridge-builder/stargazers"><img src="https://img.shields.io/github/stars/TaisenDev/aidoku-bridge-builder?style=for-the-badge" alt="GitHub stars"></a>
 </p>
 
-> [!IMPORTANT]
-> This repository is the **automation and packaging layer**. It does not implement individual manga sources. Source execution is delegated to Suwayomi through the generic [`aidoku-bridge-template`](https://github.com/TaisenDev/aidoku-bridge-template) WASM binary.
-
 ## What is this?
 
-`aidoku-bridge-builder` turns the sources already available to a Suwayomi-Server installation into a repository of installable Aidoku `.aix` packages.
+`aidoku-bridge-builder` turns Suwayomi's full extension catalog into an Aidoku repository without installing every extension on the server. It installs a catalog-listed extension only when Aidoku requests its package.
 
 The goal is to avoid rewriting or maintaining the same source logic twice.
 
-Suwayomi already knows how to install and execute Mihon/Tachiyomi-compatible extensions. The builder simply takes that source catalog, combines each source's metadata with the shared `bridge.wasm`, and publishes the resulting packages in a format Aidoku can consume.
+Suwayomi already knows how to discover, install, and execute Mihon/Tachiyomi-compatible extensions. The builder publishes catalog metadata for all matching extensions, then combines a selected extension's source metadata with one deployment-configured `bridge.wasm` when Aidoku downloads its `.aix` package.
 
 ```mermaid
 flowchart LR
-    E[(Suwayomi extensions)] -->|discover / install / update| B[aidoku-bridge-builder]
+    E[(Suwayomi extension catalog)] -->|discover / update installed| B[aidoku-bridge-builder]
     W[shared bridge.wasm] --> B
     B -->|package| R[(Aidoku source repository)]
-    R -->|index.min.json + .aix| A[Aidoku]
+    R -->|index.min.json| A[Aidoku]
+    A -->|selected package request| B
+    B -->|install selected extension + build .aix| S
+    B -->|.aix| A
     A -->|API requests| W
     W -->|GraphQL / REST| S[Suwayomi-Server]
     S --> E
@@ -47,21 +47,18 @@ flowchart LR
 
 ## How it works
 
-Every build/update cycle follows the same pipeline:
+The scheduled catalog cycle and an on-demand installation follow separate paths:
 
 | Step | What happens |
 | --- | --- |
-| **1. Refresh** | Calls Suwayomi's extension API to refresh the available extension catalog. |
-| **2. Install** | Automatically installs extensions matching the configured `LANGUAGES` filter when they are not already installed. |
-| **3. Update** | Runs `updateExtensions` for installed extensions reporting `hasUpdate`. |
-| **4. Read source metadata** | Collects source IDs, names, languages, versions, listings and icons from Suwayomi. |
-| **5. Build package metadata** | Writes a source-specific `res/source.json` and `res/settings.json`. |
-| **6. Normalize icon** | Converts the source icon into an opaque `128×128` PNG suitable for the Aidoku package. |
-| **7. Package** | Creates the `.aix` archive from the shared `bridge.wasm` plus the source-specific `res/` directory. |
-| **8. Version** | Computes the Aidoku package version as `extension versionCode × 10 + TEMPLATE_VERSION`. |
-| **9. Publish index** | Rewrites `index.min.json` and removes stale packages that are no longer present. |
+| **1. Refresh catalog** | Reads all extension package metadata from Suwayomi. |
+| **2. Publish available extensions** | Writes index entries and icons for uninstalled catalog packages; it does not install their APKs. |
+| **3. Update installed extensions** | Runs `updateExtensions` only for installed packages reporting `hasUpdate`. |
+| **4. Publish installed sources** | Collects each installed source's ID, name, language, version and icon, then builds or reuses its `.aix`. |
+| **5. Install on demand** | When Aidoku downloads an uninstalled entry, `/install/<package>.aix` validates it against the live extension catalog, installs that package, and builds an `.aix` for its first source. Additional sources from a multi-source extension appear after the index refresh. |
+| **6. Version and publish** | Computes package versions as `extension versionCode × 10 + TEMPLATE_VERSION` and rewrites `index.min.json`. |
 
-The result is a static Aidoku source repository that can be served over HTTPS.
+The result is a public HTTPS repository. A selected package request can install only an extension present in Suwayomi's catalog and enabled by `LANGUAGES`.
 
 ## Why use two repositories?
 
@@ -92,7 +89,7 @@ That separation gives the project two useful properties:
 - **The WASM logic is generic.** A source-specific Rust rebuild is not required for each website.
 - **The builder is lightweight.** It only needs the prebuilt WASM template plus access to Suwayomi.
 
-The corresponding runtime implementation lives in [`aidoku-bridge-template`](https://github.com/TaisenDev/aidoku-bridge-template).
+The corresponding runtime implementation lives in [`template/`](template/).
 
 ## Output repository
 
@@ -124,7 +121,7 @@ Aidoku can then discover and install the generated sources from that repository.
 | [Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server) | Source of truth for extensions, source metadata, versions and icons |
 | [Aidoku](https://aidoku.app) | Client that consumes the generated source list and `.aix` packages |
 | Docker | Recommended runtime for the builder |
-| `bridge.wasm` | Built once from [`aidoku-bridge-template`](https://github.com/TaisenDev/aidoku-bridge-template) |
+| `bridge.wasm` | Compiled in the container image build from [`template/`](template/) |
 
 Suwayomi documents its GraphQL API at `/api/graphql` and its server is built to run Mihon/Tachiyomi extensions. citeturn206971search1turn431769view1
 
@@ -134,18 +131,25 @@ The builder is configured through environment variables:
 
 | Variable | Required | Default | Description |
 | --- | :---: | --- | --- |
+| `STATIC_URL` | **Yes** | — | Public base serving this repo (index + packages). |
 | `SUWAYOMI_URL` | No | `http://suwayomi:4567` | Internal URL used by the builder to reach Suwayomi. |
-| `SUWAYOMI_USER` | **Yes** | — | Server username: used to talk to Suwayomi and baked as the runtime username. |
-| `SUWAYOMI_PASS` | **Yes** | — | Server password, sent on every request (servers without auth ignore it). Baked (obfuscated) only when `BAKE_CREDENTIALS=true`. |
-| `PUBLIC_SUWAYOMI_URL` | **Yes** | — | Public URL baked into generated bridge settings. |
-| `PUBLIC_REPO_BASE` | **Yes** | — | Base URL used for package/icon downloads. |
-| `BAKE_CREDENTIALS` | No | `false` | When `true`, also embeds `SUWAYOMI_PASS` in generated packages, obfuscated as `obf1:` (see below). |
-| `LANGUAGES` | No | `es` | Restricts automatic installation, e.g. `es` or `es,en` (or `all`). |
-| `BRIDGE_WASM` | No | `/wasm/bridge.wasm` | Optional override path to a user-supplied template binary. The image already bundles a pinned `bridge.wasm`; set this only to use your own file. |
+| `SUWAYOMI_USER` / `SUWAYOMI_PASS` | No | — | Optional pair for builder → Suwayomi auth. Omit both when Suwayomi runs without auth. |
+| `LANGUAGES` | No | `all` | Filters the public catalog and installable packages: `all`, `es`, `es,en`, `es,multi`, … |
 | `REPO_DIR` | No | `/repo` | Output directory served as the Aidoku source repository. |
-| `POLL_SECONDS` | No | `3600` | Delay between update cycles. |
+| `POLL_SECONDS` | No | `3600` | Seconds between update cycles. |
 
-Missing required variables fail fast with an explicit configuration error.
+Build args: none. The image ships a marker-slot wasm; each deployment
+patches its own config at container startup from runtime env:
+
+| Variable | Required | Default | Description |
+| --- | :---: | --- | --- |
+| `STATIC_URL` | **Yes** | — | Public base serving this repo (index + packages). Doubles as the API default. |
+| `API_URL` | No | `STATIC_URL` + `/api` | Public gateway base baked into the wasm (separate host allowed). |
+| `TOKEN` | **Yes** | — | Random bearer token baked into the WASM. Must match `GATEWAY_TOKEN`; at least 32 characters. |
+| `GATEWAY_TOKEN` | **Yes** | — | Gateway's matching bearer token. The gateway fails closed if absent. |
+| `INSTALL_HOST` / `INSTALL_PORT` | No | `127.0.0.1:8081` | Private builder endpoint used by the reverse proxy for on-demand `.aix` downloads. |
+
+Missing or mismatched configuration fails closed before an index is published. `STATIC_URL` and `API_URL` must use HTTPS.
 
 ## Docker
 
@@ -170,22 +174,24 @@ docker compose up -d --build bridge-builder
 ```yaml
 services:
   bridge-builder:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:0.1.6
+    image: ghcr.io/taisendev/aidoku-bridge-builder:1.0.0
     volumes:
       - ./repo:/repo
     environment:
       SUWAYOMI_URL: http://suwayomi:4567
-      SUWAYOMI_USER: suwayomi-user
-      SUWAYOMI_PASS: suwayomi-pass      # omit when the server has no auth
-      PUBLIC_SUWAYOMI_URL: https://suwayomi.example.com
-      PUBLIC_REPO_BASE: https://aidoku.example.com
-      LANGUAGES: es
+      STATIC_URL: ${STATIC_URL:?set STATIC_URL}
+      API_URL: ${API_URL:-}
+      TOKEN: ${TOKEN:-}
+      LANGUAGES: all
     restart: unless-stopped
 ```
 
-No `bridge.wasm` volume needed: the image bundles the pinned template binary
-(see Release chain). To use your own WASM instead, mount it and set
-`BRIDGE_WASM` to its in-container path.
+The image compiles the stock WASM in its build stage. At startup the builder
+patches the deployment URL and token into a single copy, then reuses that
+copy for all sources. Aidoku users configure no server URL or Suwayomi
+username/password in each source.
+
+For the OCI host-network deployment with Caddy, see [`deploy/oci/`](deploy/oci/).
 
 The output directory (`./repo` in this example) can be served by Caddy, nginx, an object-storage website, or any other static HTTPS server.
 
@@ -205,48 +211,55 @@ This makes both sides of the project update-aware:
 That means a template bug fix can propagate through the existing source packages without requiring source-specific Rust changes.
 
 Each package also ships `config.breakingChangeVersion` set to its own
-version, so Aidoku runs the bridge's key migration (legacy numeric → stable,
-failures keep the old key) exactly when the package updates. The migration
-handler is idempotent, so repeated runs are safe.
+version, so Aidoku runs the bridge's legacy manga-key migration when the
+package updates. Stable manga keys include the source ID and manga URL; after
+a Suwayomi database reset, the bridge can re-add a missing manga by its saved
+URL and resolve its new server row ID. The migration handler is idempotent.
+
+Chapter keys are still Suwayomi's numeric chapter IDs. If you replace or reset
+the Suwayomi database, manga identity is recoverable from its URL, but chapter
+IDs can change; back up Aidoku before the first reconnect and check reading
+progress on a small sample before relying on it.
 
 ## Credentials & security
 
-Credentials deserve special attention because generated `.aix` packages can be shared independently of the builder.
+Runtime traffic goes phone → gateway → Suwayomi. In the OCI deployment,
+Suwayomi listens only on loopback, the gateway and package-install service
+also bind only to loopback, and Caddy is the only public listener. The gateway
+allows parsed GraphQL documents containing only the bridge's root fields and
+only the manga-thumbnail/chapter-page media paths.
 
-By default, `BAKE_CREDENTIALS=false`, which avoids embedding the proxy password in every package.
-With this setting the password lives only on the user's device (typed once in Aidoku source settings).
-
-Enabling `BAKE_CREDENTIALS=true` intentionally changes that security model:
-the password is embedded in every package, obfuscated as `obf1:{nonce}.{b64}`
-(XOR with a SHA-256 key bound to server URL + username + nonce).
+Server URL and bearer token are embedded in the deployment WASM. The token is
+obfuscated in the binary, not kept secret.
 
 > [!WARNING]
-> Obfuscation is **not** encryption. Anyone who obtains a generated `.aix`
-> package plus the public template source can recover the baked password.
-> A server/username change in Aidoku settings decodes to garbage and fails
-> closed (retype the password), but a shared credential-bearing package must
-> still be treated as sensitive. The planned gateway (password never baked,
-> bridge talks to a scoped public API) is the real fix.
+> Anyone who can download a public `.aix` can recover its token. Treat the
+> runtime API as publicly reachable: the token blocks casual requests, while
+> the gateway's strict operation/path allowlist, loopback binding, Cloudflare
+> proxy, and rate controls limit what callers can do. The on-demand package
+> route is also public, but accepts only packages currently present in the
+> configured Suwayomi extension catalog and is rate-limited to six package
+> downloads per client IP per hour. URL-based manga imports are separately
+> capped at 120 per client IP per hour. Keep the origin reachable only through
+> Cloudflare so the proxy-provided client IP used by these limits cannot be
+> spoofed by a direct request.
 
 Keep secrets out of:
 
 - Git commits
 - GitHub Issues / Pull Requests
-- Docker images intended for public distribution
 - build logs
 - public package repositories
 
-## Release chain (template → image → repo)
+## Release chain (one repo, one tag)
 
-The image carries a **pinned** template binary (`Dockerfile` `ARG TEMPLATE_RELEASE`),
-never `latest`. Publishing a template change is three ordered steps:
+Template, builder, gateway, and stock wasm version together. A change
+anywhere is:
 
 ```text
-1. template repo  → tag vX.Y.Z → CI publishes bridge.wasm release asset
-2. builder repo   → bump Dockerfile ARG TEMPLATE_RELEASE=vX.Y.Z (+ TEMPLATE_VERSION
-                   when res/layout changes) → tag vA.B.C → CI pushes image
-3. deployment     → docker compose pull bridge-builder → next cycle rebuilds
-                   every bridge → Aidoku offers updates
+1. edit + tag vX.Y.Z (CI builds + pushes the image, smoke-tests the patch)
+2. deployment → change the image tag → docker compose up -d → next cycle
+               rebuilds every bridge → Aidoku offers updates
 ```
 
 `TEMPLATE_VERSION` forces a rebuild of all packages even when no upstream
@@ -282,15 +295,16 @@ flowchart TB
     subgraph VPS[Your VPS / computer]
         S[Suwayomi-Server]
         B[aidoku-bridge-builder]
-        W[bridge.wasm]
+        W[deployment bridge.wasm]
         R[Static repository directory]
         S --> B
         W --> B
         B --> R
     end
 
-    C[Aidoku on iPhone / iPad] -->|read index.min.json| R
-    C -->|install .aix| R
+    C[Aidoku on iPhone] -->|read index.min.json| R
+    C -->|download selected .aix| B
+    C[Aidoku on iPhone] -->|install .aix| R
     C -->|use installed source| W
     W -->|API requests| S
 ```
@@ -303,9 +317,8 @@ Once the builder is running:
 
 1. Expose `REPO_DIR` through HTTPS.
 2. Confirm that `index.min.json` is publicly reachable.
-3. Add that URL to Aidoku as a source list.
-4. Install the generated sources.
-5. Configure the proxy/server password in Aidoku when the package does not contain it.
+3. Add `https://your-host/index.min.json` to Aidoku as a source list.
+4. Install a source; if its extension is not installed yet, that one package is installed and built on demand.
 
 Example source-list URL:
 
@@ -319,23 +332,12 @@ Suwayomi is the core execution layer in this architecture. Its server runs Mihon
 
 This project therefore focuses on **adaptation and packaging**, not on reproducing the source ecosystem.
 
-## Related repository
-
-### [`aidoku-bridge-template`](https://github.com/TaisenDev/aidoku-bridge-template)
-
-Contains the reusable Rust/WASM implementation that maps Aidoku's source interface to Suwayomi's API.
-
-### [`aidoku-bridge-builder`](https://github.com/TaisenDev/aidoku-bridge-builder)
-
-This repository: automates discovery, installation, updating, packaging, indexing, and serving.
-
 ## Project links
 
 | Resource | Link |
 | --- | --- |
 | Organization | [TaisenDev](https://github.com/TaisenDev) |
 | Builder | [aidoku-bridge-builder](https://github.com/TaisenDev/aidoku-bridge-builder) |
-| Template | [aidoku-bridge-template](https://github.com/TaisenDev/aidoku-bridge-template) |
 | Suwayomi-Server | [Suwayomi/Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server) |
 | Aidoku | [aidoku.app](https://aidoku.app) |
 | Aidoku Rust API / CLI | [Aidoku/aidoku-rs](https://github.com/Aidoku/aidoku-rs) |

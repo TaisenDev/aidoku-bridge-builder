@@ -1,5 +1,7 @@
-name: Build + push bridge-builder image
+name: Build + push bridge image
 
+# Public image ships the marker-slot wasm; each deployment patches its own
+# config at container startup. Safe to distribute.
 on:
   push:
     tags: ["v*"]
@@ -44,3 +46,28 @@ jobs:
             ${{ env.IMAGE }}:${{ env.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke test startup patch
+        run: |
+          set -euo pipefail
+          name=bridge-smoke-${GITHUB_RUN_ID}
+          cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "$name" --platform linux/arm64 \
+            -e STATIC_URL=https://aidoku.example.com \
+            -e API_URL=https://aidoku.example.com/api \
+            -e TOKEN=smoke-test-token-0123456789abcdef0123456789 \
+            -e GATEWAY_TOKEN=smoke-test-token-0123456789abcdef0123456789 \
+            -e POLL_SECONDS=3600 \
+            ${{ env.IMAGE }}:${{ env.VERSION }} >/dev/null
+          for attempt in $(seq 1 20); do
+            logs="$(docker logs "$name" 2>&1 || true)"
+            if grep -q "patched deployment wasm (api=https://aidoku.example.com/api, token=set)" <<<"$logs"; then
+              echo "startup patch OK"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$name"
+          echo "startup patch marker not found" >&2
+          exit 1

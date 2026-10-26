@@ -1,0 +1,70 @@
+services:
+  builder:
+    image: ghcr.io/taisendev/aidoku-bridge-builder:latest
+    container_name: aidoku-builder
+    command: ["python", "-u", "builder.py"]
+    network_mode: host
+    user: "1001:1001"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      SUWAYOMI_URL: http://127.0.0.1:4567
+      STATIC_URL: https://suwayomi.example.invalid
+      API_URL: https://suwayomi.example.invalid/api
+      TOKEN: ${BRIDGE_TOKEN:?set BRIDGE_TOKEN in deploy/oci/.env}
+      GATEWAY_TOKEN: ${BRIDGE_TOKEN:?set BRIDGE_TOKEN in deploy/oci/.env}
+      LANGUAGES: all
+      REPO_DIR: /repo
+      POLL_SECONDS: "3600"
+      INSTALL_HOST: 127.0.0.1
+      INSTALL_PORT: "8081"
+    volumes:
+      - /opt/suwayomi/aidoku/repo:/repo
+
+  gateway:
+    image: ghcr.io/taisendev/aidoku-bridge-builder:latest
+    container_name: aidoku-gateway
+    command: ["python", "-u", "gateway.py"]
+    network_mode: host
+    user: "1001:1001"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      SUWAYOMI_URL: http://127.0.0.1:4567
+      GATEWAY_TOKEN: ${BRIDGE_TOKEN:?set BRIDGE_TOKEN in deploy/oci/.env}
+      BIND_HOST: 127.0.0.1
+      PORT: "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: aidoku-caddy
+    network_mode: host
+    user: "1001:1001"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/suwayomi/aidoku/repo:/srv/repo:ro
+      - /opt/suwayomi/aidoku/caddy-data:/data
+      - /opt/suwayomi/aidoku/caddy-config:/config

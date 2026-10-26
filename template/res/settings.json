@@ -1,0 +1,6 @@
+[
+  { "type": "group", "title": "Source", "footer": "Preconfigured source for Suwayomi",
+    "items": [
+      { "type": "text", "key": "sourceId", "title": "Suwayomi Source ID", "placeholder": "3142617638635917969" }
+    ]}
+]
