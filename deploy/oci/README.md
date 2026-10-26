@@ -2,7 +2,7 @@
 
 This deployment keeps Suwayomi and both bridge services on loopback. Caddy is
 the only public listener and serves the Aidoku catalog at
-`https://suwayomi.example.invalid/index.min.json`.
+`https://your-domain.example/index.min.json`.
 
 ## Before starting the containers
 
@@ -10,7 +10,7 @@ the only public listener and serves the Aidoku catalog at
    `ghcr.io/taisendev/aidoku-bridge-builder:<version>` for ARM64 and AMD64.
    Use that version tag in `compose.yaml`; do not rely on `latest` for a
    controlled deployment.
-2. In Cloudflare, keep `suwayomi.example.invalid` proxied and use SSL/TLS mode
+2. In Cloudflare, keep the hostname configured in `PUBLIC_DOMAIN` proxied and use SSL/TLS mode
    **Full (strict)**.
 3. In the OCI subnet security list/network security group, allow TCP 80 and
    443 **only from Cloudflare's current proxy IP ranges**. Keep SSH restricted
@@ -38,7 +38,7 @@ without printing the token:
 ```sh
 cd /opt/suwayomi/aidoku/deploy/oci
 umask 077
-printf 'BRIDGE_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+printf 'PUBLIC_DOMAIN=%s\nBRIDGE_TOKEN=%s\n' 'your-domain.example' "$(openssl rand -hex 32)" > .env
 ```
 
 The same random token is embedded into generated WASM and required by the
@@ -53,7 +53,7 @@ docker compose up -d
 docker compose logs --tail=80 builder gateway caddy
 ```
 
-After Caddy obtains a certificate, verify that the public index loads and
+After Caddy obtains a certificate, verify that `https://$PUBLIC_DOMAIN/index.min.json` loads and
 shows catalog entries. Add that index URL in Aidoku. Aidoku's package download
 installs only the requested catalog entry; the builder permits six package
 downloads per client IP per hour. Manga URL recovery is separately limited to

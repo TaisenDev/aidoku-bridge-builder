@@ -1,6 +1,6 @@
 services:
   builder:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:0.2.9
+    image: ghcr.io/taisendev/aidoku-bridge-builder:0.2.10
     container_name: aidoku-builder
     command: ["python", "-u", "builder.py"]
     network_mode: host
@@ -16,8 +16,8 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       SUWAYOMI_URL: http://127.0.0.1:4567
-      STATIC_URL: https://suwayomi.example.invalid
-      API_URL: https://suwayomi.example.invalid/api
+      STATIC_URL: https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in deploy/oci/.env}
+      API_URL: https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in deploy/oci/.env}/api
       TOKEN: ${BRIDGE_TOKEN:?set BRIDGE_TOKEN in deploy/oci/.env}
       GATEWAY_TOKEN: ${BRIDGE_TOKEN:?set BRIDGE_TOKEN in deploy/oci/.env}
       LANGUAGES: all
@@ -29,7 +29,7 @@ services:
       - /opt/suwayomi/aidoku/repo:/repo
 
   gateway:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:0.2.9
+    image: ghcr.io/taisendev/aidoku-bridge-builder:0.2.10
     container_name: aidoku-gateway
     command: ["python", "-u", "gateway.py"]
     network_mode: host
@@ -50,7 +50,7 @@ services:
       PORT: "8080"
 
   caddy:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:caddy-0.2.9
+    image: ghcr.io/taisendev/aidoku-bridge-builder:caddy-0.2.10
     container_name: aidoku-caddy
     network_mode: host
     user: "1001:1001"
@@ -61,6 +61,8 @@ services:
       - /tmp
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in deploy/oci/.env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /opt/suwayomi/aidoku/repo:/srv/repo:ro

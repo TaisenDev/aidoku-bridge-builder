@@ -1,4 +1,4 @@
-suwayomi.example.invalid {
+{$PUBLIC_DOMAIN} {
 	encode gzip
 
 	header {
