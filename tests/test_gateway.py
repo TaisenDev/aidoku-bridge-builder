@@ -1,5 +1,8 @@
 import unittest
+from unittest.mock import patch
 
+from builder import MAX_GLOBAL_INSTALLS_PER_HOUR, _allow_install_request
+from builder import _INSTALL_REQUESTS
 from gateway import _document_shape_is_allowed
 
 
@@ -41,6 +44,20 @@ class GatewayDocumentPolicyTests(unittest.TestCase):
     def test_rejects_aliases_and_introspection(self):
         self.assertFalse(_document_shape_is_allowed('mutation { x: bridgeResolveUrl(url: "https://example.org") { status } }'))
         self.assertFalse(_document_shape_is_allowed('query { source(id: "123") { __schema { types { name } } } }'))
+
+
+class InstallAbuseLimitTests(unittest.TestCase):
+    def test_global_install_limit_applies_across_many_client_addresses(self):
+        with patch.dict(_INSTALL_REQUESTS, {}, clear=True):
+            for index in range(MAX_GLOBAL_INSTALLS_PER_HOUR):
+                self.assertTrue(_allow_install_request(f"192.0.2.{index + 1}"))
+            self.assertFalse(_allow_install_request("198.51.100.1"))
+
+    def test_per_client_install_limit_remains_in_place(self):
+        with patch.dict(_INSTALL_REQUESTS, {}, clear=True):
+            for _ in range(6):
+                self.assertTrue(_allow_install_request("192.0.2.1"))
+            self.assertFalse(_allow_install_request("192.0.2.1"))
 
 
 if __name__ == "__main__":

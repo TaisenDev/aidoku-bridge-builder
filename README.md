@@ -221,8 +221,8 @@ and signed media handles. It limits clients to 180 GraphQL and 300 media
 requests per minute, with bursts of 45 and 60; global ceilings are 600
 GraphQL and 1,800 media requests per minute. Images are capped at 16 MiB and
 at most 48 requests run at once.
-The installer allows six package requests per client IP per hour and builds
-only one package at a time.
+The installer allows six package requests per client IP and 30 total per hour,
+builds only one package at a time, and bounds its handler pool to 16 threads.
 
 Source cookies live in process memory for Cloudflare/source compatibility and
 are discarded when Suwayomi restarts; the first startup clears the old
@@ -241,7 +241,7 @@ obfuscated in the binary, not kept secret.
 > proxy, and rate controls limit what callers can do. The on-demand package
 > route is also public, but accepts only packages currently present in the
 > configured Suwayomi extension catalog and is rate-limited to six package
-> downloads per client IP per hour. Keep the origin reachable only through
+> downloads per client IP and 30 total per hour. Keep the origin reachable only through
 > Cloudflare so the proxy-provided client IP used by these limits cannot be
 > spoofed by a direct request.
 

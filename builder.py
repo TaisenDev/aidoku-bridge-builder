@@ -70,7 +70,10 @@ _CYCLE_LOCK = threading.RLock()
 _RATE_LOCK = threading.Lock()
 _INSTALL_REQUESTS: OrderedDict[str, list[float]] = OrderedDict()
 MAX_INSTALLS_PER_HOUR = 6
+MAX_GLOBAL_INSTALLS_PER_HOUR = 30
 MAX_INSTALL_CLIENTS = 8192
+MAX_INSTALL_CLIENT_THREADS = 16
+MAX_INSTALL_AIX_BYTES = 4 * 1024 * 1024
 _INSTALL_LOCK = threading.Lock()
 _INSTALL_REQUEST_SLOTS = threading.BoundedSemaphore(1)
 
@@ -445,14 +448,22 @@ def _allow_install_request(client_key: str) -> bool:
     now = time.monotonic()
     cutoff = now - 3600
     with _RATE_LOCK:
-        recent = [t for t in _INSTALL_REQUESTS.get(client_key, []) if t > cutoff]
-        if len(recent) >= MAX_INSTALLS_PER_HOUR:
-            _INSTALL_REQUESTS[client_key] = recent
-            _INSTALL_REQUESTS.move_to_end(client_key)
+        client_bucket = f"client:{client_key}"
+        global_bucket = "global"
+        client_recent = [t for t in _INSTALL_REQUESTS.get(client_bucket, []) if t > cutoff]
+        global_recent = [t for t in _INSTALL_REQUESTS.get(global_bucket, []) if t > cutoff]
+        if len(client_recent) >= MAX_INSTALLS_PER_HOUR or len(global_recent) >= MAX_GLOBAL_INSTALLS_PER_HOUR:
+            _INSTALL_REQUESTS[client_bucket] = client_recent
+            _INSTALL_REQUESTS.move_to_end(client_bucket)
+            _INSTALL_REQUESTS[global_bucket] = global_recent
+            _INSTALL_REQUESTS.move_to_end(global_bucket)
             return False
-        recent.append(now)
-        _INSTALL_REQUESTS[client_key] = recent
-        _INSTALL_REQUESTS.move_to_end(client_key)
+        client_recent.append(now)
+        global_recent.append(now)
+        _INSTALL_REQUESTS[client_bucket] = client_recent
+        _INSTALL_REQUESTS.move_to_end(client_bucket)
+        _INSTALL_REQUESTS[global_bucket] = global_recent
+        _INSTALL_REQUESTS.move_to_end(global_bucket)
         while len(_INSTALL_REQUESTS) > MAX_INSTALL_CLIENTS:
             _INSTALL_REQUESTS.popitem(last=False)
         return True
@@ -547,6 +558,8 @@ class InstallHandler(BaseHTTPRequestHandler):
             return self._respond(503, b'{"error":"an installation is already running"}')
         try:
             package = _install_catalog_package(match.group(1))
+            if len(package) > MAX_INSTALL_AIX_BYTES:
+                raise RuntimeError("generated package exceeds the response size limit")
         except KeyError:
             return self._respond(404, b'{"error":"package is not available"}')
         except Exception as e:
@@ -560,9 +573,41 @@ class InstallHandler(BaseHTTPRequestHandler):
         return self._respond(405, b'{"error":"method not allowed"}')
 
 
+class BoundedInstallHTTPServer(ThreadingHTTPServer):
+    """Bound unauthenticated installer sockets before creating handler threads."""
+
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(self, server_address, request_handler_class):
+        super().__init__(server_address, request_handler_class)
+        self._client_slots = threading.BoundedSemaphore(MAX_INSTALL_CLIENT_THREADS)
+
+    def process_request(self, request, client_address):
+        if not self._client_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._client_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._client_slots.release()
+
+
 def start_install_server() -> None:
-    server = ThreadingHTTPServer((INSTALL_HOST, INSTALL_PORT), InstallHandler)
-    server.daemon_threads = True
+    server = BoundedInstallHTTPServer((INSTALL_HOST, INSTALL_PORT), InstallHandler)
     threading.Thread(target=server.serve_forever, name="aidoku-install-server", daemon=True).start()
     print(f"on-demand package endpoint listening on {INSTALL_HOST}:{INSTALL_PORT}", flush=True)
 
