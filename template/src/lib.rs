@@ -29,8 +29,9 @@ impl Bridge {
         if base.is_empty() {
             return Err(error!("gateway URL not configured"));
         }
-        let tok = suwayomi::token(&embedded_base);
-        Ok((base, tok, src))
+        let tok = suwayomi::token(&embedded_base)
+            .ok_or_else(|| error!("deployment gateway token unavailable"))?;
+        Ok((base, Some(tok), src))
     }
     fn manga(m: &SmManga, base: &str, src: &str) -> Manga {
         Manga { key: suwayomi::manga_key(src, m), title: m.title.clone(),
