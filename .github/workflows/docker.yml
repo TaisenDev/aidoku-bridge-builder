@@ -47,6 +47,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build + push restricted Caddy image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.caddy
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:caddy-${{ env.VERSION }}
+          cache-from: type=gha,scope=caddy
+          cache-to: type=gha,mode=max,scope=caddy
+
       - name: Smoke test startup patch
         run: |
           set -euo pipefail

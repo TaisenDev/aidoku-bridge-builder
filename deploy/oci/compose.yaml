@@ -50,7 +50,7 @@ services:
       PORT: "8080"
 
   caddy:
-    image: caddy:2-alpine
+    image: ghcr.io/taisendev/aidoku-bridge-builder:caddy-0.2.4
     container_name: aidoku-caddy
     network_mode: host
     user: "1001:1001"
@@ -61,8 +61,6 @@ services:
       - /tmp
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
-    security_opt:
-      - no-new-privileges:true
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /opt/suwayomi/aidoku/repo:/srv/repo:ro
