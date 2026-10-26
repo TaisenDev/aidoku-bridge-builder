@@ -58,7 +58,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "3600"))
 INSTALL_HOST = os.environ.get("INSTALL_HOST", "127.0.0.1")
 INSTALL_PORT = int(os.environ.get("INSTALL_PORT", "8081"))
 STATE_FILE = REPO_DIR / ".builder-state.json"
-TEMPLATE_VERSION = 12
+TEMPLATE_VERSION = 13
 
 API_SLOT_LEN = 256
 TOK_SLOT_LEN = 128
@@ -158,7 +158,7 @@ def install_or_update(pkg_names: list[str], update: bool = False) -> None:
 
 def installed_sources() -> list[dict]:
     data = gql(
-        'query { sources(first: 5000) { nodes { id name lang displayName iconUrl extension { pkgName } } } }'
+        'query { sources(first: 5000) { nodes { id name lang displayName homeUrl iconUrl extension { pkgName } } } }'
     )
     return [s for s in data["sources"]["nodes"] if s["id"] != "0"]
 
@@ -263,7 +263,7 @@ def save_state(state: dict) -> None:
 
 
 def site_url_for(source: dict) -> str:
-    return STATIC_URL
+    return (source.get("homeUrl") or "").strip().rstrip("/")
 
 
 def catalog_bridge_id(ext: dict, occupied: set[str]) -> str:
