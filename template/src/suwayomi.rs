@@ -133,6 +133,54 @@ pub fn fetch_source(base: &str, tok: &Option<String>, src: &str, ty: &str, q: Op
     gql::<SmList>(base, tok, &query).map(|d| d.fetch_source_manga)
 }
 
+pub fn resolve_chapter_id(
+    base: &str,
+    tok: &Option<String>,
+    manga_id: i32,
+    key: &str,
+    chapter_number: Option<f32>,
+    title: Option<&str>,
+    chapter_url: Option<&str>,
+) -> Result<i32> {
+    let chapters = fetch_chapters(base, tok, manga_id)?;
+    let chapter_url = chapter_url.map(str::trim).filter(|url| !url.is_empty());
+    if let Some(url) = chapter_url {
+        if let Some(chapter) = chapters.iter().find(|chapter| chapter.real_url.as_deref().map(str::trim) == Some(url)) {
+            return Ok(chapter.id);
+        }
+    }
+
+    let title = title.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(number) = chapter_number {
+        if let Some(title) = title {
+            if let Some(chapter) = chapters.iter().find(|chapter| {
+                chapter.chapter_number.map(|n| (n - number).abs() < 0.01).unwrap_or(false)
+                    && chapter.name.trim() == title
+            }) {
+                return Ok(chapter.id);
+            }
+        }
+        let mut matches = chapters.iter().filter(|chapter| {
+            chapter.chapter_number.map(|n| (n - number).abs() < 0.01).unwrap_or(false)
+        });
+        if let Some(chapter) = matches.next() {
+            if matches.next().is_none() {
+                return Ok(chapter.id);
+            }
+        }
+    }
+
+    if let Some(title) = title {
+        let mut matches = chapters.iter().filter(|chapter| chapter.name.trim() == title);
+        if let Some(chapter) = matches.next() {
+            if matches.next().is_none() {
+                return Ok(chapter.id);
+            }
+        }
+    }
+
+    key.parse::<i32>().map_err(|_| error!("could not resolve saved chapter"))
+}
 pub fn fetch_chapters(base: &str, tok: &Option<String>, manga_id: i32) -> Result<Vec<SmCh>> {
     let q = format!(r#"mutation {{ fetchChapters(input: {{ mangaId: {manga_id} }}) {{ chapters {{ id name chapterNumber uploadDate scanlator realUrl }} }} }}"#);
     gql::<SmChs>(base, tok, &q).map(|d| d.fetch_chapters.chapters)

@@ -9,13 +9,34 @@ use suwayomi::SmManga;
 struct Bridge { ids: core::cell::RefCell<Vec<(String, i32)>> }
 
 impl Bridge {
-    fn resolved_id(&self, base: &str, tok: &Option<String>, src: &str, key: &str) -> Result<i32> {
-        if let Ok(id) = key.parse::<i32>() { return Ok(id); }
-        if let Some((_, id)) = self.ids.borrow().iter().find(|(k, _)| k == key) { return Ok(*id); }
-        let id = suwayomi::resolve_manga_id(base, tok, src, key)?;
-        self.ids.borrow_mut().push((String::from(key), id));
+    fn resolved_id(&self, base: &str, tok: &Option<String>, src: &str, key: &str, manga_url: Option<&str>) -> Result<i32> {
+        let id = if let Ok(id) = key.parse::<i32>() {
+            if let Some(url) = manga_url.map(str::trim).filter(|u| u.starts_with("http://") || u.starts_with("https://")) {
+                let matches_live = suwayomi::fetch_manga_details(base, tok, id).ok()
+                    .and_then(|m| m.real_url.or(m.url))
+                    .map(|live| live == url)
+                    .unwrap_or(false);
+                if matches_live {
+                    id
+                } else {
+                    suwayomi::add_by_url(base, tok, url)?
+                        .manga.map(|m| m.id)
+                        .ok_or(error!("could not resolve saved manga URL"))?
+                }
+            } else {
+                id
+            }
+        } else if let Some((_, id)) = self.ids.borrow().iter().find(|(k, _)| k == key) {
+            *id
+        } else {
+            suwayomi::resolve_manga_id(base, tok, src, key)?
+        };
+        if key.parse::<i32>().is_err() {
+            self.ids.borrow_mut().push((String::from(key), id));
+        }
         Ok(id)
-    }    fn cfg(&self) -> Result<(String, Option<String>, String)> {
+    }
+    fn cfg(&self) -> Result<(String, Option<String>, String)> {
         let src = defaults_get::<String>("sourceId").filter(|s| !s.is_empty())
             .ok_or(aidoku::AidokuError::Message(String::from("Missing source configuration")))?;
         let embedded_base = suwayomi::api_base()
@@ -133,7 +154,7 @@ impl Source for Bridge {
     }
     fn get_manga_update(&self, mut manga: Manga, need_d: bool, need_c: bool) -> Result<Manga> {
         let (base, tok, s) = self.cfg()?;
-        let id = self.resolved_id(&base, &tok, &s, &manga.key)?;
+        let id = self.resolved_id(&base, &tok, &s, &manga.key, manga.url.as_deref())?;
         if need_c {
             let cs = suwayomi::fetch_chapters(&base, &tok, id)?;
             manga.chapters = Some(cs.into_iter().map(|c| Chapter {
@@ -163,10 +184,14 @@ impl Source for Bridge {
         }
         Ok(manga)
     }
-    fn get_page_list(&self, _m: Manga, ch: Chapter) -> Result<Vec<Page>> {
-        let (base, tok, _s) = self.cfg()?;
-        let id: i32 = ch.key.parse().map_err(|_| error!("bad chapter key"))?;
-        Ok(suwayomi::fetch_pages(&base, &tok, id)?.into_iter()
+    fn get_page_list(&self, manga: Manga, ch: Chapter) -> Result<Vec<Page>> {
+        let (base, tok, src) = self.cfg()?;
+        let manga_id = self.resolved_id(&base, &tok, &src, &manga.key, manga.url.as_deref())?;
+        let chapter_id = suwayomi::resolve_chapter_id(
+            &base, &tok, manga_id, &ch.key, ch.chapter_number,
+            ch.title.as_deref(), ch.url.as_deref(),
+        )?;
+        Ok(suwayomi::fetch_pages(&base, &tok, chapter_id)?.into_iter()
             .map(|x| Page { content: PageContent::url(suwayomi::abs(&base, &x)), ..Default::default() }).collect())
     }
 }
