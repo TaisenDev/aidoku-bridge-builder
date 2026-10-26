@@ -58,9 +58,17 @@ ALLOWED_MEDIA_PATH = re.compile(
 
 def check_token(handler: BaseHTTPRequestHandler) -> bool:
     auth = handler.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return hmac.compare_digest(auth[7:], GATEWAY_TOKEN)
-    return False
+    if not auth:
+        print("auth rejected: Authorization header missing", flush=True)
+        return False
+    if not auth.startswith("Bearer "):
+        print("auth rejected: unsupported Authorization scheme", flush=True)
+        return False
+    supplied = auth[7:]
+    if not hmac.compare_digest(supplied, GATEWAY_TOKEN):
+        print(f"auth rejected: bearer mismatch (length={len(supplied)})", flush=True)
+        return False
+    return True
 
 
 def client_key(handler: BaseHTTPRequestHandler) -> str:
