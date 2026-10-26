@@ -21,7 +21,7 @@ impl Bridge {
         let base = defaults_get::<String>("gatewayUrl")
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(suwayomi::api_base);
-        let base = base.trim_end_matches('/').to_string();
+        let base = String::from(base.trim_end_matches('/'));
         if base.is_empty() {
             return Err(error!("gateway URL not configured"));
         }
