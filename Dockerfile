@@ -1,4 +1,6 @@
-FROM rust:1-bookworm AS forge
+# Compile the architecture-independent WASM on BuildKit's native platform.
+# Otherwise the x86_64 Rust toolchain runs under QEMU on the ARM runner.
+FROM --platform=$BUILDPLATFORM rust:1-bookworm AS forge
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates python3 \
   && rm -rf /var/lib/apt/lists \
