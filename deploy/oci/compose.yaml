@@ -1,6 +1,6 @@
 services:
   builder:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:0.2.11
+    image: ghcr.io/taisendev/aidoku-bridge-builder:0.2.12
     container_name: aidoku-builder
     command: ["python", "-u", "builder.py"]
     network_mode: host
@@ -29,7 +29,7 @@ services:
       - /opt/suwayomi/aidoku/repo:/repo
 
   gateway:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:0.2.11
+    image: ghcr.io/taisendev/aidoku-bridge-builder:0.2.12
     container_name: aidoku-gateway
     command: ["python", "-u", "gateway.py"]
     network_mode: host
@@ -50,7 +50,7 @@ services:
       PORT: "8080"
 
   caddy:
-    image: ghcr.io/taisendev/aidoku-bridge-builder:caddy-0.2.11
+    image: ghcr.io/taisendev/aidoku-bridge-builder:caddy-0.2.12
     container_name: aidoku-caddy
     network_mode: host
     user: "1001:1001"

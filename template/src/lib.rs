@@ -18,10 +18,13 @@ impl Bridge {
     }    fn cfg(&self) -> Result<(String, Option<String>, String)> {
         let src = defaults_get::<String>("sourceId").filter(|s| !s.is_empty())
             .ok_or(aidoku::AidokuError::Message(String::from("Missing source configuration")))?;
-        let base = defaults_get::<String>("gatewayUrl")
+        let configured_base = defaults_get::<String>("gatewayUrl")
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(suwayomi::api_base);
-        let base = String::from(base.trim_end_matches('/'));
+        let configured_base = configured_base.trim_end_matches('/');
+        // Older package settings may persist the former `/api` suffix.
+        // The bridge appends `/api/...` itself, and the token is salted by the root URL.
+        let base = String::from(configured_base.strip_suffix("/api").unwrap_or(configured_base));
         if base.is_empty() {
             return Err(error!("gateway URL not configured"));
         }
