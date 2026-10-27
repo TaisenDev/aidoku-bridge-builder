@@ -176,7 +176,8 @@ impl Source for Bridge {
         if need_c {
             manga.chapters = Some(d.chapters.into_iter().map(|c| Chapter {
                 key: c.real_url.clone().or(c.url.clone()).unwrap_or_default(), title: Some(c.name.clone()),
-                chapter_number: if c.chapter_number >= 0.0 { c.chapter_number } else { number_from_chapter_name(&c.name).unwrap_or(c.chapter_number) },
+                chapter_number: c.chapter_number.filter(|n| *n >= 0.0)
+                    .or_else(|| number_from_chapter_name(&c.name)),
                 date_uploaded: c.upload_date.and_then(|ms| ms.parse::<i64>().ok()).map(|ms| ms / 1000),
                 scanlators: c.scanlator.filter(|s| !s.is_empty()).map(|s| Vec::from([s])),
                 url: c.real_url, ..Default::default() }).collect());
