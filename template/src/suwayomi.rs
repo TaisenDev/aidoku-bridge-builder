@@ -109,6 +109,7 @@ fn gql<T: serde::de::DeserializeOwned>(base: &str, tok: &Option<String>, query: 
     let url = format!("{}/api/graphql", base);
     let body = serde_json::to_vec(&Body { query }).map_err(|e| error!("json: {:?}", e))?;
     let mut req = Request::post(&url).map_err(|e| error!("req: {:?}", e))?;
+    req.set_header("User-Agent", "Aidoku/1.0");
     req.set_header("Content-Type", "application/json");
     req.set_header("Accept", "application/json");
     if let Some(t) = token_value(tok) { req.set_header("X-Bridge-Token", t); }

@@ -227,6 +227,7 @@ impl ImageRequestProvider for Bridge {
     fn get_image_request(&self, url: String, _ctx: Option<aidoku::HashMap<String, String>>) -> Result<Request> {
         let (base, tok, _s) = self.cfg().unwrap_or((String::from(""), None, String::from("")));
         let mut req = Request::get(&url).map_err(|e| error!("{:?}", e))?;
+        req.set_header("User-Agent", "Aidoku/1.0");
         let gateway_prefix = format!("{}/", base.trim_end_matches('/'));
         if !base.is_empty() && (url == base || url.starts_with(gateway_prefix.as_str())) {
             if let Some(t) = suwayomi::token_value(&tok) { req.set_header("X-Bridge-Token", t); }
