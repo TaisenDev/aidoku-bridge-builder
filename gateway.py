@@ -65,6 +65,17 @@ _PAGE_TILES: OrderedDict[str, tuple[float, list[bytes], int, int, int]] = Ordere
 _PAGE_TILE_BYTES = 0
 
 
+def response_cache_control(path: str, status: int, content_type: str) -> str:
+    """Cache only successful signed image handles in the requesting device's cache."""
+    if (status == 200
+            and content_type.lower().startswith("image/")
+            and (MEDIA_PATH.fullmatch(path) or PAGE_TILE_PATH.fullmatch(path))):
+        # Signed media handles live for one hour. Keep this private TTL shorter
+        # so the device can reuse covers without making them publicly cacheable.
+        return "private, max-age=900"
+    return "no-store"
+
+
 def encode_page_tiles(data: bytes) -> tuple[int, int, list[bytes]]:
     """Downscale to an iPad-friendly width and split long pages into transient JPEG tiles."""
     with Image.open(io.BytesIO(data)) as opened:
@@ -375,7 +386,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Cache-Control", "no-store")
+        path = urllib.parse.urlsplit(self.path).path
+        self.send_header("Cache-Control", response_cache_control(path, code, ctype))
         self.end_headers()
         self.wfile.write(body)
 

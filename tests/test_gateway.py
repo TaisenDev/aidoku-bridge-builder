@@ -5,7 +5,7 @@ from PIL import Image
 
 from builder import MAX_GLOBAL_INSTALLS_PER_HOUR, _allow_install_request, ikisaku_catalog_data
 from builder import _INSTALL_REQUESTS
-from gateway import _document_shape_is_allowed, encode_page_tiles
+from gateway import _document_shape_is_allowed, encode_page_tiles, response_cache_control
 
 
 class GatewayDocumentPolicyTests(unittest.TestCase):
@@ -116,6 +116,12 @@ class IkisakuCatalogTests(unittest.TestCase):
 
 
 class PageImageOptimizationTests(unittest.TestCase):
+    def test_successful_signed_images_are_private_cached_but_errors_are_not(self):
+        path = "/api/v1/bridge/media/" + "a" * 24 + "." + "b" * 24
+        self.assertEqual(response_cache_control(path, 200, "image/jpeg"), "private, max-age=900")
+        self.assertEqual(response_cache_control(path, 502, "image/jpeg"), "no-store")
+        self.assertEqual(response_cache_control("/api/graphql", 200, "application/json"), "no-store")
+
     def test_downscales_and_splits_long_pages_without_disk_state(self):
         source = Image.new("RGB", (1600, 3500), "white")
         buffer = io.BytesIO()

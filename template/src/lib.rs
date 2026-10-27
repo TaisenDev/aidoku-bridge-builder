@@ -8,6 +8,46 @@ use suwayomi::SmManga;
 
 struct Bridge;
 
+// Some Mihon sources return a useful chapter title but leave chapterNumber at
+// -1. Aidoku then displays that sentinel alongside the title (for example,
+// "Capitulo -1 - 109"). Recover the numeric value from explicit chapter labels
+// so the app can sort/display it correctly while retaining the original title.
+fn number_from_chapter_name(name: &str) -> Option<f32> {
+    fn parse_after(text: &str, marker: &str) -> Option<f32> {
+        let lower = text.to_ascii_lowercase();
+        let mut i = lower.find(marker)? + marker.len();
+        let bytes = text.as_bytes();
+        while i < bytes.len() && !bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == bytes.len() {
+            return None;
+        }
+        let mut value = 0.0f32;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            value = value * 10.0 + (bytes[i] - b'0') as f32;
+            i += 1;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+            i += 1;
+            let mut place = 0.1f32;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                value += (bytes[i] - b'0') as f32 * place;
+                place *= 0.1;
+                i += 1;
+            }
+        }
+        (value > 0.0).then_some(value)
+    }
+
+    for marker in ["capitulo", "capítulo", "chapter", "episode", "episodio", "cap.", "chap.", "ep.", "cap"] {
+        if let Some(number) = parse_after(name, marker) {
+            return Some(number);
+        }
+    }
+    None
+}
+
 impl Bridge {
     fn cfg(&self) -> Result<(String, Option<String>, String)> {
         let src = defaults_get::<String>("sourceId").filter(|s| !s.is_empty())
@@ -136,7 +176,7 @@ impl Source for Bridge {
         if need_c {
             manga.chapters = Some(d.chapters.into_iter().map(|c| Chapter {
                 key: c.real_url.clone().or(c.url.clone()).unwrap_or_default(), title: Some(c.name.clone()),
-                chapter_number: c.chapter_number,
+                chapter_number: if c.chapter_number >= 0.0 { c.chapter_number } else { number_from_chapter_name(&c.name).unwrap_or(c.chapter_number) },
                 date_uploaded: c.upload_date.and_then(|ms| ms.parse::<i64>().ok()).map(|ms| ms / 1000),
                 scanlators: c.scanlator.filter(|s| !s.is_empty()).map(|s| Vec::from([s])),
                 url: c.real_url, ..Default::default() }).collect());
